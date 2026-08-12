@@ -10,4 +10,7 @@ public record ExpeditionEnvironment(
     float BubbleRadius,
     int MaxBubbles,
     Func<Vector2, bool> IsValidPlacement,
-    List<(Vector2i Position, float Radius)> Bubbles);
+    Func<Vector2, float> GetWalkableCoverage,
+    List<(Vector2i Position, float Radius)> Bubbles,
+    bool IsVoyage,
+    int TotalRemainingBubbles);

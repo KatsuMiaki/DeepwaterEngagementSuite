@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using DeepwaterEngagementSuite.VoyagePlannerData;
 using ExileCore;
+using ExileCore.PoEMemory;
 using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.Elements.InventoryElements;
@@ -28,13 +29,27 @@ public partial class DeepwaterEngagementSuite
     private SyncTask<bool> _voyagePlaceTask;
     private VoyageSolve _voyageSolve;
     private VoyageScorer _uiScorer;
+    private VoyagePlacementRules.Result _lastPlacement;
     private int _selectedSolutionIndex = 0;
     private bool _voyageSolving;
     private bool _voyageTimedOut;
+    private bool _voyageWindowWasOpen;
+    private bool _voyageAutoSolvePending;
+    private bool _voyageInventoryPrimePending;
+    private int _voyageLastReadyChartCount = -1;
+    private int _voyageReadyChartStableFrames;
     private long _voyageNodesExplored;
     private long _voyageNodesPruned;
     private double _voyageElapsed;
     private System.Diagnostics.Stopwatch _voyageStopwatch;
+    private string _voyageBoardFingerprint;
+    private int _voyageSolveGeneration;
+    private BorderLootAnalysis _borderLootAnalysis;
+    private string _lastObservedBorderFingerprint;
+    private string _borderAnalysisFingerprint;
+    private int _observedBorderRerolls;
+
+    private const int VoyageChartStableFramesRequired = 12;
 
     public List<NormalInventoryItem> GetAvailableCharts()
     {
@@ -52,12 +67,15 @@ public partial class DeepwaterEngagementSuite
                 return charts;
             }
 
-            var chartSize = charts[0].GetClientRectCache.Size;
+            var layoutChart = charts.FirstOrDefault(IsChartItemInteractable);
+            if (layoutChart == null)
+                return charts;
+            var chartSize = layoutChart.GetClientRectCache.Size;
             var containerRect = voyageWindow.ChartContainer.GetClientRectCache;
             var containerSize = containerRect.Size;
             var inventorySize = new Vector2i(
                 (int)Math.Round(containerSize.Width/chartSize.Width),
-                (int)Math.Round(containerSize.Height / chartSize.Height)); //TODO: is this gettable somewhere?
+                (int)Math.Round(containerSize.Height / chartSize.Height));
             var filtered = charts.Select(x =>
                 {
                     var coord = ((x.GetClientRectCache.TopLeft - containerRect.TopLeft).ToVector2Num()
@@ -81,6 +99,198 @@ public partial class DeepwaterEngagementSuite
     private static bool BoardIsClear(VoyageWindow tree) =>
         tree.Tiles.All(t => !TileHasChart(t));
 
+    private static Element GetVoyageChartInventoryTabBar(VoyageWindow tree) =>
+        tree?.GetChildFromIndices(3, 11, 0);
+
+    private static Element GetVoyageChartInventoryInactiveTab(VoyageWindow tree) =>
+        tree?.GetChildFromIndices(3, 11, 0, 0);
+
+    private static int? GetActiveVoyageChartInventoryTabIndex(VoyageWindow tree)
+    {
+        var bar = GetVoyageChartInventoryTabBar(tree);
+        if (bar is not { IsValid: true })
+            return null;
+
+        foreach (var child in bar.Children)
+        {
+            if (child is { IsValid: true, IsActive: true })
+                return child.IndexInParent;
+        }
+
+        foreach (var child in bar.Children)
+        {
+            if (child is { IsValid: true, isHighlighted: true })
+                return child.IndexInParent;
+        }
+
+        return null;
+    }
+
+    private string GetVoyageChartInventoryTabFingerprint(VoyageWindow tree)
+    {
+        var activeTab = GetActiveVoyageChartInventoryTabIndex(tree);
+        var chartIds = GetAvailableCharts()
+            .Where(IsChartItemInteractable)
+            .Select(GetChartIdentity)
+            .Where(id => id != 0)
+            .OrderBy(id => id);
+        return $"tab:{activeTab?.ToString() ?? "-"}|charts:{string.Join(",", chartIds)}";
+    }
+
+    private async SyncTask<bool> ClickVoyageChartInventoryInactiveTab(VoyageWindow tree, bool needsFocusWiggle)
+    {
+        var inactiveTab = GetVoyageChartInventoryInactiveTab(tree)
+            ?? throw new InvalidOperationException(
+                "Voyage chart inventory inactive tab not found at (VoyageWindow)3->11->0->0");
+
+        var winOrigin = GameController.Window.GetWindowRectangleTimeCache.TopLeft.ToVector2Num();
+        var tabPos = winOrigin + inactiveTab.GetClientRectCache.Center.ToVector2Num();
+        Input.SetCursorPos(tabPos);
+        if (needsFocusWiggle)
+            await WiggleCursorToFocus(tabPos);
+
+        await TaskUtils.NextFrame();
+        Input.LeftDown();
+        await TaskUtils.NextFrame();
+        Input.LeftUp();
+        return true;
+    }
+
+    private async SyncTask<bool> WaitForVoyageChartInventoryTabChange(
+        VoyageWindow tree,
+        string beforeFingerprint,
+        TimeSpan timeout)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            await TaskUtils.NextFrame();
+            if (tree is not { IsValid: true, IsVisible: true })
+                return false;
+            if (!string.Equals(
+                    GetVoyageChartInventoryTabFingerprint(tree),
+                    beforeFingerprint,
+                    StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    private async SyncTask<bool> PrimeVoyageChartInventory(VoyageWindow tree)
+    {
+        try
+        {
+            var inactiveTab = GetVoyageChartInventoryInactiveTab(tree);
+            if (inactiveTab is not { IsValid: true })
+                return true;
+
+            var rect = inactiveTab.GetClientRectCache;
+            if (rect.Width <= 1 || rect.Height <= 1)
+                return true;
+
+            var beforeFingerprint = GetVoyageChartInventoryTabFingerprint(tree);
+            const int maxAttempts = 12;
+            var switched = false;
+            for (var attempt = 0; attempt < maxAttempts; attempt++)
+            {
+                await ClickVoyageChartInventoryInactiveTab(tree, needsFocusWiggle: attempt == 0);
+                if (await WaitForVoyageChartInventoryTabChange(
+                        tree,
+                        beforeFingerprint,
+                        TimeSpan.FromMilliseconds(300)))
+                {
+                    switched = true;
+                    break;
+                }
+            }
+
+            if (!switched)
+            {
+                DebugWindow.LogError(
+                    "Voyage inventory prime: active tab did not change after repeated swaps; " +
+                    "other-page chart data may still be unloaded.");
+            }
+
+            return switched;
+        }
+        catch (Exception ex)
+        {
+            DebugWindow.LogError($"Voyage inventory prime failed: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            _voyageInventoryPrimePending = false;
+            _voyageLastReadyChartCount = -1;
+            _voyageReadyChartStableFrames = 0;
+        }
+    }
+
+    private static bool IsChartItemInteractable(NormalInventoryItem item) =>
+        item is { IsValid: true, IsVisible: true } &&
+        item.GetClientRectCache is { Width: > 1, Height: > 1 };
+
+    private static long GetChartIdentity(NormalInventoryItem item) =>
+        item?.Item?.Address ?? item?.Entity?.Address ?? item?.Address ?? 0;
+
+    private NormalInventoryItem FindChartByIdentity(long identity)
+    {
+        if (identity == 0)
+            return null;
+        return GetAvailableCharts().FirstOrDefault(c => GetChartIdentity(c) == identity);
+    }
+
+    private async SyncTask<(NormalInventoryItem Item, bool NeedsFocusWiggle)> EnsureChartItemOnActiveTab(
+        VoyageWindow tree,
+        NormalInventoryItem pieceElem,
+        Vector2 winOrigin,
+        bool needsFocusWiggle)
+    {
+        if (IsChartItemInteractable(pieceElem))
+            return (pieceElem, needsFocusWiggle);
+
+        var identity = GetChartIdentity(pieceElem);
+        await ClickVoyageChartInventoryInactiveTab(tree, needsFocusWiggle);
+        needsFocusWiggle = false;
+
+        await TaskUtils.CheckEveryFrameWithThrow(
+            () =>
+            {
+                var current = identity != 0 ? FindChartByIdentity(identity) ?? pieceElem : pieceElem;
+                return IsChartItemInteractable(current);
+            },
+            () => "Chart item still not visible after switching inventory tab",
+            TimeSpan.FromSeconds(2));
+
+        var resolved = identity != 0 ? FindChartByIdentity(identity) ?? pieceElem : pieceElem;
+        if (!IsChartItemInteractable(resolved))
+            throw new InvalidOperationException("Chart item not interactable after inventory tab switch");
+
+        return (resolved, needsFocusWiggle);
+    }
+
+    private static DeepwaterChart TryGetTileChart(VoyageTileElement tile) =>
+        tile?.ItemContainer?.Entity?.GetComponent<DeepwaterChart>();
+
+    private static int? TryGetTileRotation(VoyageTileElement tile) =>
+        TryGetTileChart(tile)?.Rotation;
+
+    private static Direction? TryGetTileConnections(VoyageTileElement tile)
+    {
+        var chart = TryGetTileChart(tile);
+        if (chart == null)
+            return null;
+        return ((Direction)chart.Room.Path).RotateCcw(chart.Rotation);
+    }
+
+    private static bool TileMatchesPlacement(VoyageTileElement tile, MapPiecePlacement expected)
+    {
+        if (expected?.Piece == null)
+            return !TileHasChart(tile);
+        return TryGetTileConnections(tile) == expected.Connections;
+    }
+
     private static async SyncTask<bool> WiggleCursorToFocus(Vector2 screenPos)
     {
         const float delta = 4f;
@@ -92,6 +302,112 @@ public partial class DeepwaterEngagementSuite
         await TaskUtils.NextFrame();
         Input.SetCursorPos(screenPos);
         await TaskUtils.NextFrame();
+        return true;
+    }
+
+    private async SyncTask<bool> WaitChartPlacementDelay()
+    {
+        var ms = Settings.VoyageSettings.ChartPlacementDelayMs.Value;
+        if (ms <= 0)
+            return true;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < ms)
+            await TaskUtils.NextFrame();
+        return true;
+    }
+
+    private async SyncTask<bool> RotateTileToMatch(
+        VoyageTileElement tile,
+        MapPiecePlacement expected,
+        Vector2 winOrigin)
+    {
+        await TaskUtils.CheckEveryFrameWithThrow(
+            () => TileHasChart(tile),
+            () => "Tile has no chart to rotate",
+            TimeSpan.FromSeconds(1));
+
+        if (TileMatchesPlacement(tile, expected))
+            return true;
+
+        for (var click = 0; click < 4; click++)
+        {
+            if (TileMatchesPlacement(tile, expected))
+                return true;
+
+            var beforeRot = TryGetTileRotation(tile);
+            if (beforeRot is null)
+                throw new InvalidOperationException("Chart rotation unavailable while rotating");
+
+            DebugWindow.LogMsg(
+                $"Voyage Place rotate: tile rot {beforeRot} → target rot {expected.Rotation} " +
+                $"(conn {TryGetTileConnections(tile)} → {expected.Connections})");
+
+            var clickPos = winOrigin + tile.GetClientRectCache.Center.ToVector2Num();
+            Input.SetCursorPos(clickPos);
+            await TaskUtils.CheckEveryFrameWithThrow(
+                () => GameController.IngameState.UIHover?.Address.Equals(tile.ItemContainer.Address) ?? false,
+                TimeSpan.FromSeconds(1));
+            Input.RightDown();
+            await TaskUtils.NextFrame();
+            Input.RightUp();
+            await WaitChartPlacementDelay();
+            await TaskUtils.CheckEveryFrameWithThrow(
+                () =>
+                {
+                    if (TileMatchesPlacement(tile, expected))
+                        return true;
+                    var now = TryGetTileRotation(tile);
+                    return now is { } rot && rot != beforeRot;
+                },
+                () => $"Rotation did not change after right-click (was {beforeRot})",
+                TimeSpan.FromSeconds(1));
+        }
+
+        if (!TileMatchesPlacement(tile, expected))
+        {
+            throw new InvalidOperationException(
+                $"Tile still wrong after 4 rotations: got conn {TryGetTileConnections(tile)}/rot {TryGetTileRotation(tile)}, " +
+                $"expected conn {expected.Connections}/rot {expected.Rotation}");
+        }
+
+        return true;
+    }
+
+    private async SyncTask<bool> EnsureAllRotations(
+        VoyageSolution solution,
+        VoyageWindow tree,
+        Vector2 winOrigin)
+    {
+        for (var i = 0; i < 9; i++)
+        {
+            var tile = tree.Tiles[i];
+            var p = solution.Grid[i / 3, i % 3];
+            if (p?.Piece == null || TileMatchesPlacement(tile, p))
+                continue;
+
+            DebugWindow.LogMsg(
+                $"Voyage Place: final pass fixing tile {i} " +
+                $"(got {TryGetTileConnections(tile)}/{TryGetTileRotation(tile)}, " +
+                $"want {p.Connections}/{p.Rotation})");
+            await RotateTileToMatch(tile, p, winOrigin);
+        }
+
+        for (var i = 0; i < 9; i++)
+        {
+            var tile = tree.Tiles[i];
+            var p = solution.Grid[i / 3, i % 3];
+            if (p?.Piece == null)
+                continue;
+            if (!TileMatchesPlacement(tile, p))
+            {
+                throw new InvalidOperationException(
+                    $"Board orientation check failed at tile {i}: " +
+                    $"got conn {TryGetTileConnections(tile)}/rot {TryGetTileRotation(tile)}, " +
+                    $"expected conn {p.Connections}/rot {p.Rotation}");
+            }
+        }
+
         return true;
     }
 
@@ -120,6 +436,7 @@ public partial class DeepwaterEngagementSuite
                 Input.LeftDown();
                 await TaskUtils.NextFrame();
                 Input.LeftUp();
+                await WaitChartPlacementDelay();
                 await TaskUtils.CheckEveryFrameWithThrow(
                     () => BoardIsClear(tree),
                     () => "Board still has charts after Clear",
@@ -139,7 +456,11 @@ public partial class DeepwaterEngagementSuite
                     continue;
                 }
 
-                var pieceElem = availableCharts[p.Piece.Id];
+                var ensureResult = await EnsureChartItemOnActiveTab(
+                    tree, availableCharts[p.Piece.Id], winOrigin, needsFocusWiggle);
+                var pieceElem = ensureResult.Item;
+                needsFocusWiggle = ensureResult.NeedsFocusWiggle;
+                availableCharts[p.Piece.Id] = pieceElem;
                 var click1Pos = winOrigin + pieceElem.GetClientRectCache.Center.ToVector2Num();
                 var click2Pos = winOrigin + tile.GetClientRectCache.Center.ToVector2Num();
                 Input.SetCursorPos(click1Pos);
@@ -156,6 +477,7 @@ public partial class DeepwaterEngagementSuite
                 Input.LeftDown();
                 await TaskUtils.NextFrame();
                 Input.LeftUp();
+                await WaitChartPlacementDelay();
                 await TaskUtils.CheckEveryFrameWithThrow(
                     () => GameController.IngameState.IngameUi.Cursor.Action == MouseActionType.HoldItemForSell,
                     TimeSpan.FromSeconds(1));
@@ -167,30 +489,16 @@ public partial class DeepwaterEngagementSuite
                 Input.LeftDown();
                 await TaskUtils.NextFrame();
                 Input.LeftUp();
+                await WaitChartPlacementDelay();
                 await TaskUtils.CheckEveryFrameWithThrow(
                     () => GameController.IngameState.IngameUi.Cursor.Action == MouseActionType.Free &&
                           TileHasChart(tile),
                     TimeSpan.FromSeconds(1));
 
-                while (tile.ItemContainer?.Entity.GetComponent<DeepwaterChart>()?.Rotation is { } rot &&
-                       rot != p.Rotation)
-                {
-                    DebugWindow.LogMsg($"{rot}, {p.Rotation}");
-                    var click3Pos = winOrigin + tile.GetClientRectCache.Center.ToVector2Num();
-                    Input.SetCursorPos(click3Pos);
-                    await TaskUtils.CheckEveryFrameWithThrow(
-                        () => GameController.IngameState.UIHover?.Address.Equals(tile.ItemContainer.Address) ?? false,
-                        TimeSpan.FromSeconds(1));
-                    Input.RightDown();
-                    await TaskUtils.NextFrame();
-                    Input.RightUp();
-                    await TaskUtils.CheckEveryFrameWithThrow(
-                        () => tile.ItemContainer?.Entity?.GetComponent<DeepwaterChart>()?.Rotation is { } rot2 &&
-                              rot2 != rot,
-                        TimeSpan.FromSeconds(1));
-                }
+                await RotateTileToMatch(tile, p, winOrigin);
             }
 
+            await EnsureAllRotations(solution, tree, winOrigin);
             return true;
         }
         catch (Exception ex)
@@ -226,118 +534,215 @@ public partial class DeepwaterEngagementSuite
         if (tree is not { IsValid: true, IsVisible: true })
         {
             _voyagePlaceTask = null;
+            _voyageWindowWasOpen = false;
+            _voyageAutoSolvePending = false;
+            _voyageInventoryPrimePending = false;
+            _voyageLastReadyChartCount = -1;
+            _voyageReadyChartStableFrames = 0;
+            _voyageBoardFingerprint = null;
+            _borderLootAnalysis = null;
+            _lastObservedBorderFingerprint = null;
+            _borderAnalysisFingerprint = null;
+            _observedBorderRerolls = 0;
+            InvalidateVoyageSolveState(clearResults: true);
             return;
         }
 
+        if (!_voyageWindowWasOpen)
+        {
+            _voyageWindowWasOpen = true;
+            _voyageAutoSolvePending = true;
+            _voyageInventoryPrimePending = true;
+            _voyageLastReadyChartCount = -1;
+            _voyageReadyChartStableFrames = 0;
+            _voyageBoardFingerprint = null;
+            _lastObservedBorderFingerprint = null;
+            _borderAnalysisFingerprint = null;
+            _observedBorderRerolls = 0;
+        }
+
+        if (_voyageInventoryPrimePending && _voyagePlaceTask == null)
+            _voyagePlaceTask = PrimeVoyageChartInventory(tree);
+
         TaskUtils.RunOrRestart(ref _voyagePlaceTask, () => null);
+
+        var boardFingerprint = BuildVoyageBoardFingerprint(tree);
+        UpdateBorderLootAnalysis(tree, boardFingerprint);
+        if (!string.Equals(boardFingerprint, _voyageBoardFingerprint, StringComparison.Ordinal))
+        {
+            _voyageBoardFingerprint = boardFingerprint;
+            InvalidateVoyageSolveState(clearResults: true);
+            _voyageAutoSolvePending = true;
+            _voyageLastReadyChartCount = -1;
+            _voyageReadyChartStableFrames = 0;
+        }
+
+        if (!_voyageInventoryPrimePending &&
+            _voyageAutoSolvePending && _run is not { IsCompleted: false })
+            TryStartAutoVoyageSolve(tree);
 
         var modsPerTileIndex = GetTileMods(tree);
 
         var tiles = tree.Tiles;
-        if (settings.DrawComboLabels.Value)
+        var boardHasStrategyOrb = modsPerTileIndex.Values
+            .Any(tileMods => VoyagePlacementRules.HasStrategyOrb(tileMods.Select(m => m.RawName)));
+        var boardStrongTreasureAnchors = VoyagePlacementRules.IsStrongTreasureAnchors(
+            modsPerTileIndex.Values.SelectMany(tileMods => tileMods.Select(m => m.RawName)));
+
+        for (var index = 0; index < tiles.Count; index++)
         {
-            for (var index = 0; index < tiles.Count; index++)
+            var tile = tiles[index];
+            var mods = modsPerTileIndex.GetValueOrDefault(index) ?? [];
+            if (settings.ShowScoreDebugDetails.Value)
             {
-                var tile = tiles[index];
-                var mods = modsPerTileIndex.GetValueOrDefault(index) ?? [];
-                var tileCenter = tile.GetClientRectCache.Center.ToVector2Num();
-                var chart = tile.ItemContainer?.Entity?.GetComponent<DeepwaterChart>();
-                if (chart != null)
+                var tileTopLeft = tile.GetClientRectCache.TopLeft.ToVector2Num();
+                Graphics.DrawTextWithBackground($"({index / 3}, {index % 3})", tileTopLeft, Color.Black);
+            }
+            var tileCenter = tile.GetClientRectCache.Center.ToVector2Num();
+            var chart = tile.ItemContainer?.Entity?.GetComponent<DeepwaterChart>();
+            if (chart != null)
+            {
+                var chartModOffset = -10f;
+
+                if (VoyagePlacementRules.TrySpecialtyRoomLabel(chart.Room.Name, out var roomLabel))
                 {
-                    var chartModOffset = -10f;
-
-                    if (VoyagePlacementRules.TrySpecialtyRoomLabel(chart.Room.Name, out var roomLabel))
-                    {
-                        var roomText = roomLabel;
-                        var roomSize = Graphics.MeasureText(roomText);
-                        chartModOffset -= roomSize.Y;
-                        Graphics.DrawTextWithBackground(roomText, tileCenter + new Vector2(0, chartModOffset),
-                            Color.Violet, FontAlign.Center, Color.Black);
-                    }
-
-                    var chartMods = tile.ItemContainer.Entity.GetComponent<Mods>()?.ImplicitMods ?? [];
-                    foreach (var im in chartMods)
-                    {
-                        if (!Settings.VoyageSettings.ShowAllChartModifiers &&
-                            !VoyagePlacementRules.IsSpecialtyComboModifier(im.RawName))
-                            continue;
-
-                        var chartMod = Settings.VoyageSettings.ChartModifiers.Content
-                            .FirstOrDefault(cm => cm.Id.Value.Equals(im.RawName, StringComparison.OrdinalIgnoreCase));
-                        if (chartMod?.HighlightColor.Value is not { A: > 0 } color)
-                            continue;
-
-                        var displayName = chartMod.Label.Value is { Length: > 0 } label
-                            ? label
-                            : TrimChartPrefix(im.RawName);
-                        var prefix = chartMod.IsGlobal.Value ? "[G] " : "";
-                        var weight = chartMod.Weight.Value;
-                        var chartName = $"{prefix}{displayName}\n({weight:F1})";
-                        var textSize = Graphics.MeasureText(chartName);
-                        chartModOffset -= textSize.Y;
-                        Graphics.DrawTextWithBackground(chartName, tileCenter + new Vector2(0, chartModOffset),
-                            color, FontAlign.Center, Color.Black);
-                    }
+                    var roomText = roomLabel;
+                    var roomSize = Graphics.MeasureText(roomText);
+                    chartModOffset -= roomSize.Y;
+                    Graphics.DrawTextWithBackground(roomText, tileCenter + new Vector2(0, chartModOffset),
+                        Color.Orange, FontAlign.Center, Color.Black);
                 }
 
-                var strongTreasureAnchors = VoyagePlacementRules.IsStrongTreasureAnchors(
-                    mods.Select(m => m.RawName));
-                tileCenter = tileCenter + new Vector2(0, 10);
-                foreach (var itemMod in mods)
+                var chartMods = tile.ItemContainer.Entity.GetComponent<Mods>()?.ImplicitMods ?? [];
+                foreach (var im in chartMods)
                 {
-                    var isStrategy = VoyagePlacementRules.IsStrategyBorder(itemMod.RawName);
-                    var isTreasureHighlight = strongTreasureAnchors &&
-                                              VoyagePlacementRules.IsTreasureAnchorsBorder(itemMod.RawName);
-                    if (!Settings.VoyageSettings.ShowAllBorderModifiers && !isStrategy && !isTreasureHighlight)
+                    var isCombo = VoyagePlacementRules.IsSpecialtyComboModifier(im.RawName)
+                                  || (boardHasStrategyOrb &&
+                                      VoyagePlacementRules.IsIncreasedRareStrategyModifier(im.RawName));
+                    var show = Settings.VoyageSettings.ShowAllChartModifiers || isCombo;
+                    if (!show)
                         continue;
 
-                    var matchingSetting = Settings.VoyageSettings.BorderModifiers.Content
-                        .FirstOrDefault(c => c.Id.Value.Equals(itemMod.RawName, StringComparison.OrdinalIgnoreCase));
-                    var text = matchingSetting?.Abbreviation.Value is { Length: > 0 } abbv
-                        ? abbv
-                        : itemMod.RawName.StartsWith("DeepwaterBorder", StringComparison.Ordinal)
-                            ? itemMod.RawName["DeepwaterBorder".Length..]
-                            : itemMod.RawName;
-                    var color = matchingSetting?.HighlightColor.Value is { A: > 0 } c ? c : Color.Cyan;
-                    var size = Graphics.DrawTextWithBackground(text, tileCenter, color, FontAlign.Center, Color.Black);
-                    tileCenter.Y += size.Y;
+                    var chartMod = Settings.VoyageSettings.ChartModifiers.Content
+                        .FirstOrDefault(cm => cm.Id.Value.Equals(im.RawName, StringComparison.OrdinalIgnoreCase));
+                    if (!isCombo && chartMod?.HighlightColor.Value is not { A: > 0 })
+                        continue;
+
+                    var displayName = chartMod?.Label.Value is { Length: > 0 } label
+                        ? label
+                        : TrimChartPrefix(im.RawName);
+                    var prefix = chartMod?.IsGlobal.Value == true ? "[G] " : "";
+                    var weight = chartMod?.Weight.Value ?? 0;
+                    var chartName = chartMod != null
+                        ? $"{prefix}{displayName}\n({weight:F1})"
+                        : displayName;
+                    var textSize = Graphics.MeasureText(chartName);
+                    chartModOffset -= textSize.Y;
+                    var color = isCombo
+                        ? Color.Orange
+                        : chartMod.HighlightColor.Value;
+                    Graphics.DrawTextWithBackground(chartName, tileCenter + new Vector2(0, chartModOffset),
+                        color, FontAlign.Center, Color.Black);
                 }
             }
 
-            var charts = GetAvailableCharts();
-            var specialtyIndices = GetInventorySpecialtyIndices(charts);
-
-            for (int i = 0; i < charts.Count; i++)
+            tileCenter = tileCenter + new Vector2(0, 10);
+            foreach (var itemMod in mods)
             {
-                var pos = charts[i].GetClientRectCache.TopLeft.ToVector2Num();
-                if (specialtyIndices.Contains(i))
-                {
-                    var exclSize = Graphics.DrawTextWithBackground("!", pos, Color.Violet, Color.Black);
-                    pos.Y += exclSize.Y;
-                }
+                var isStrategy = VoyagePlacementRules.IsStrategyBorder(itemMod.RawName);
+                var isTreasure = boardStrongTreasureAnchors &&
+                                 VoyagePlacementRules.IsTreasureAnchorsBorder(itemMod.RawName);
+                var isCombo = isStrategy || isTreasure;
+                var showTieredBorder = Settings.VoyageSettings.Economy.Enabled.Value &&
+                                       Settings.VoyageSettings.Economy.AutomaticTierColors.Value;
+                if (!Settings.VoyageSettings.ShowAllBorderModifiers && !isCombo && !showTieredBorder)
+                    continue;
 
-                if (Settings.VoyageSettings.ShowChartInventoryInformation)
-                {
-                    var size = Graphics.DrawTextWithBackground($"#{i}", pos, Color.Black);
-                    var chartMods = charts[i].Entity.GetComponent<Mods>()?.ImplicitMods ?? [];
+                var matchingSetting = Settings.VoyageSettings.BorderModifiers.Content
+                    .FirstOrDefault(c => c.Id.Value.Equals(itemMod.RawName, StringComparison.OrdinalIgnoreCase));
+                var text = matchingSetting?.Abbreviation.Value is { Length: > 0 } abbv
+                    ? abbv
+                    : itemMod.RawName.StartsWith("DeepwaterBorder", StringComparison.Ordinal)
+                        ? itemMod.RawName["DeepwaterBorder".Length..]
+                        : itemMod.RawName;
+                var lootEntry = _borderLootAnalysis?.Find(index / 3, index % 3, itemMod.RawName);
+                if (Settings.VoyageSettings.Economy.ShowBorderScore.Value && lootEntry != null)
+                    text += $" [{lootEntry.Score:0}]";
+                var color = Settings.VoyageSettings.Economy.AutomaticTierColors.Value && lootEntry != null
+                    ? BorderTierColor(lootEntry.Tier)
+                    : isCombo
+                        ? Color.Orange
+                        : matchingSetting?.HighlightColor.Value is { A: > 0 } c ? c : Color.Cyan;
+                var size = Graphics.DrawTextWithBackground(text, tileCenter, color, FontAlign.Center, Color.Black);
+                tileCenter.Y += size.Y;
+            }
+        }
 
-                    foreach (var chartMod in chartMods)
+        var charts = GetAvailableCharts();
+        var specialtyIndices = GetInventorySpecialtyIndices(charts);
+
+        for (int i = 0; i < charts.Count; i++)
+        {
+            if (!IsChartItemInteractable(charts[i]))
+                continue;
+
+            var pos = charts[i].GetClientRectCache.TopLeft.ToVector2Num();
+            if (specialtyIndices.Contains(i))
+            {
+                var exclSize = Graphics.DrawTextWithBackground("!", pos, Color.Orange, Color.Black);
+                pos.Y += exclSize.Y;
+            }
+
+            if (Settings.VoyageSettings.ShowChartInventoryInformation)
+            {
+                var size = Graphics.DrawTextWithBackground($"#{i}", pos, Color.Black);
+                var chartMods = charts[i].Entity.GetComponent<Mods>()?.ImplicitMods ?? [];
+
+                foreach (var chartMod in chartMods)
+                {
+                    var chartSettings = Settings.VoyageSettings.ChartModifiers.Content
+                        .FirstOrDefault(cm => cm.Id.Value.Equals(chartMod.RawName, StringComparison.OrdinalIgnoreCase));
+                    if (chartSettings != null && !string.IsNullOrEmpty(chartSettings.Label.Value))
                     {
-                        var chartSettings = Settings.VoyageSettings.ChartModifiers.Content
-                            .FirstOrDefault(cm => cm.Id.Value.Equals(chartMod.RawName, StringComparison.OrdinalIgnoreCase));
-                        if (chartSettings != null && !string.IsNullOrEmpty(chartSettings.Label.Value))
-                        {
-                            pos.Y += size.Y;
-                            Graphics.DrawTextWithBackground(chartSettings.Label.Value, pos, chartSettings.HighlightColor, Color.Black);
-                        }
+                        pos.Y += size.Y;
+                        Graphics.DrawTextWithBackground(chartSettings.Label.Value, pos, chartSettings.HighlightColor, Color.Black);
                     }
                 }
             }
         }
 
+        DrawStrategyOnCompass(tree);
+
         if (settings.ShowOptimizerWindow.Value)
         {
             ShowVoyageOptimizerWindow(tree,tiles);
+        }
+    }
+
+    private void DrawStrategyOnCompass(VoyageWindow tree)
+    {
+        var placement = _lastPlacement ?? _voyageSolve?.Placement;
+        if (placement == null)
+            return;
+
+        var names = DescribeActiveStrategies(placement);
+        if (names.Count == 0)
+            return;
+
+        var clear = tree.ClearButton;
+        if (clear == null)
+            return;
+
+        var rect = clear.GetClientRectCache;
+        if (rect.Width <= 0 || rect.Height <= 0)
+            return;
+
+        var pos = new Vector2(rect.Center.X, rect.Top);
+        foreach (var name in names)
+        {
+            var size = Graphics.MeasureText(name);
+            pos.Y -= size.Y;
+            Graphics.DrawTextWithBackground(name, pos, Color.Orange, FontAlign.Center, Color.Black);
         }
     }
 
@@ -367,6 +772,289 @@ public partial class DeepwaterEngagementSuite
         return modsPerTileIndex;
     }
 
+    private static int CountReadyCharts(VoyageWindow tree)
+    {
+        var charts = tree?.AvailableCharts;
+        if (charts == null || charts.Count == 0)
+            return 0;
+
+        var ready = 0;
+        foreach (var chart in charts)
+        {
+            if (chart?.Item != null && chart.Item.TryGetComponent(out DeepwaterChart _))
+                ready++;
+        }
+
+        return ready;
+    }
+
+    private void TryStartAutoVoyageSolve(VoyageWindow tree)
+    {
+        var ready = CountReadyCharts(tree);
+
+        // The two-page UI exposes empty slot elements as AvailableCharts. Requiring every slot to
+        // contain an entity prevents auto-solve on partially filled pages, even with dozens of
+        // valid charts. The tab-prime step already ran; only the valid chart count must stabilize.
+        if (ready < 9)
+        {
+            _voyageLastReadyChartCount = ready;
+            _voyageReadyChartStableFrames = 0;
+            return;
+        }
+
+        if (ready != _voyageLastReadyChartCount)
+        {
+            _voyageLastReadyChartCount = ready;
+            _voyageReadyChartStableFrames = 0;
+            return;
+        }
+
+        _voyageReadyChartStableFrames++;
+        if (_voyageReadyChartStableFrames < VoyageChartStableFramesRequired)
+            return;
+
+        _voyageAutoSolvePending = false;
+        StartVoyageSolve(tree);
+    }
+
+    private void StartVoyageSolve(VoyageWindow tree)
+    {
+        if (tree is not { IsValid: true, IsVisible: true })
+            return;
+        if (_run is { IsCompleted: false })
+        {
+            _voyageSolve?.Cancel();
+            _voyageAutoSolvePending = true;
+            return;
+        }
+
+        _voyageAutoSolvePending = false;
+        _voyageSolve?.Cancel();
+        _result = null;
+        _lastPlacement = null;
+        _selectedSolutionIndex = 0;
+        _voyageNodesExplored = 0;
+        _voyageNodesPruned = 0;
+        _voyageElapsed = 0;
+        _voyageTimedOut = false;
+        _voyageSolving = true;
+        _voyageStopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        var pieces = BuildMapPiecesFromAvailableCharts();
+        var tileBorders = BuildTileBorders(tree);
+        var timeLimitSetting = Settings.VoyageSettings.SolverTimeLimitSeconds.Value;
+        var useFastSolver = Settings.VoyageSettings.UseFastSolver.Value;
+        var strategyOptions = Settings.VoyageSettings.Strategies.ToOptions();
+        var economy = Settings.VoyageSettings.Economy;
+        var layoutSettings = Settings.VoyageSettings.Layouts;
+        var selectedLayouts = layoutSettings.SelectedFamilies();
+        var premiumLayoutOverride = layoutSettings.IgnoreRestrictionsForPremium.Value &&
+                                    _borderLootAnalysis is { } borderAnalysis &&
+                                    (borderAnalysis.HasPremiumCombo ||
+                                     borderAnalysis.Score >= layoutSettings.PremiumScoreThreshold.Value);
+        var allowedLayouts = premiumLayoutOverride ? VoyageLayoutFamilies.All : selectedLayouts;
+        var layoutPreference = allowedLayouts == VoyageLayoutFamilies.StraightLines
+            ? VoyageLayoutPreference.StraightLines
+            : premiumLayoutOverride
+                ? _borderLootAnalysis?.LayoutPreference ?? VoyageLayoutPreference.SnakeOrCompact
+                : VoyageLayoutPreference.SnakeOrCompact;
+        var layoutStrength = economy.Enabled.Value ? economy.LayoutPreferenceStrength.Value : 0;
+        var generation = ++_voyageSolveGeneration;
+
+        _run = Task.Run(() =>
+        {
+            try
+            {
+                var session = new VoyageSolve();
+                if (generation != _voyageSolveGeneration)
+                    return;
+
+                _voyageSolve = session;
+
+                foreach (var r in session.Run(
+                             pieces,
+                             tileBorders,
+                             useFastSolver: useFastSolver,
+                             settings: new VoyagePlannerSettings(TimeLimitSeconds: timeLimitSetting),
+                             strategyOptions: strategyOptions,
+                             layoutPreference: layoutPreference,
+                             layoutPreferenceStrength: layoutStrength,
+                             allowedLayoutFamilies: allowedLayouts,
+                             minimumLayoutSimilarity: layoutSettings.MinimumSimilarityPercent.Value / 100d))
+                {
+                    if (generation != _voyageSolveGeneration)
+                        return;
+                    _result = r;
+                    _voyageNodesExplored = r.NodesExplored;
+                    _voyageNodesPruned = r.NodesPruned;
+                    _uiScorer = session.Scorer;
+                }
+
+                if (generation != _voyageSolveGeneration)
+                    return;
+
+                _uiScorer = session.Scorer;
+                _lastPlacement = session.Placement;
+                LogPlacement(session.Placement);
+
+                _voyageTimedOut = session.WasSlowTimedOut && !session.RecoveredWithFastSolver;
+            }
+            finally
+            {
+                if (generation == _voyageSolveGeneration)
+                    _voyageSolving = false;
+            }
+        });
+    }
+
+    private void InvalidateVoyageSolveState(bool clearResults)
+    {
+        _voyageSolveGeneration++;
+        _voyageSolve?.Cancel();
+        if (!clearResults)
+            return;
+
+        _result = null;
+        _lastPlacement = null;
+        _uiScorer = null;
+        _selectedSolutionIndex = 0;
+        _voyageNodesExplored = 0;
+        _voyageNodesPruned = 0;
+        _voyageElapsed = 0;
+        _voyageTimedOut = false;
+        if (_run is not { IsCompleted: false })
+            _voyageSolving = false;
+    }
+
+    private string BuildVoyageBoardFingerprint(VoyageWindow tree)
+    {
+        var parts = new List<string>();
+        var borders = tree?.Data?.BorderMods;
+        if (borders != null)
+        {
+            foreach (var mod in borders)
+                parts.Add(mod == null
+                    ? ""
+                    : mod.RawName + ":" + string.Join(',', mod.Values));
+        }
+
+        var charts = tree?.AvailableCharts;
+        if (charts != null)
+        {
+            foreach (var chart in charts)
+            {
+                if (chart?.Item == null)
+                {
+                    parts.Add("-");
+                    continue;
+                }
+
+                var room = chart.Item.TryGetComponent(out DeepwaterChart dc) ? dc.Room.Name ?? "" : "";
+                var mods = chart.Item.GetComponent<Mods>()?.ImplicitMods;
+                var modNames = mods == null
+                    ? ""
+                    : string.Join(',', mods.Select(m => m.RawName));
+                parts.Add(room + "|" + modNames);
+            }
+        }
+
+        var economy = Settings.VoyageSettings.Economy;
+        var layouts = Settings.VoyageSettings.Layouts;
+        parts.Add($"solver:{Settings.VoyageSettings.UseFastSolver.Value}");
+        parts.Add($"layout:{economy.Enabled.Value}:{economy.LayoutPreferenceStrength.Value}:" +
+                  $"{layouts.AllowSnakeDollar.Value}:{layouts.AllowCompact.Value}:{layouts.AllowStraightLines.Value}:" +
+                  $"{layouts.IgnoreRestrictionsForPremium.Value}:{layouts.PremiumScoreThreshold.Value}:" +
+                  $"{layouts.MinimumSimilarityPercent.Value}");
+        parts.Add($"market:{economy.DivineChaos.Value}:{economy.AnnulmentChaos.Value}:" +
+                  $"{economy.AncientChaos.Value}:{economy.ExaltedChaos.Value}:{economy.GemcuttersChaos.Value}");
+        parts.Add($"profile:{Settings.VoyageSettings.ProfileSelector.Value}");
+        foreach (var mod in Settings.VoyageSettings.BorderModifiers.Content)
+            parts.Add($"B:{mod.Id.Value}:{mod.ValueMultiplier.Value}:{mod.Tags.Value}:{mod.PerConnection.Value}:{mod.AffectsPlacedChart.Value}");
+        foreach (var mod in Settings.VoyageSettings.ChartModifiers.Content)
+            parts.Add($"C:{mod.Id.Value}:{mod.Weight.Value}:{mod.Tags.Value}:{mod.IsGlobal.Value}");
+
+        var strategies = Settings.VoyageSettings.Strategies;
+        parts.Add($"strategies:{strategies.UniqueAmuletClamCross.Value}:{strategies.RareMonstersDrop.Value}:" +
+                  $"{strategies.RareCurrencyStrongboxEngine.Value}:" +
+                  $"{strategies.SaveSeaPillars.Value}:" +
+                  $"{strategies.NoConsumeAnchorfield.Value}:{strategies.CenterSpecialty.Value}:" +
+                  $"{strategies.AutomaticFocus.Value}:{strategies.MaxActiveFocuses.Value}:" +
+                  $"{strategies.MinimumFocusScore.Value}:{strategies.SecondaryFocusRatioPercent.Value}:" +
+                  $"{strategies.FocusWeightBonusPercent.Value}:{strategies.OffFocusMultiplierPercent.Value}:" +
+                  $"{strategies.ProtectBrineKing.Value}:{strategies.SaveBrineKing.Value}:" +
+                  $"{strategies.ReserveStrongboxesForValuableCurrency.Value}:{strategies.SaveStrongboxes.Value}:" +
+                  $"{strategies.ReserveGlobalRareForPremiumStrategies.Value}:{strategies.SaveGlobalRare.Value}:" +
+                  $"{strategies.DedicatedLostMessageStrategy.Value}:{strategies.MinimumLostMessageCharts.Value}:" +
+                  $"{strategies.SaveLostMessageCharts.Value}:" +
+                  $"{strategies.ReserveSulphurForSulphurBorder.Value}:{strategies.SaveSulphurCharts.Value}:" +
+                  $"{strategies.SaveKishara.Value}:{strategies.SaveNoEquipment.Value}:" +
+                  $"{strategies.SaveFractured.Value}:{strategies.SaveGoldenLanterns.Value}:" +
+                  $"{strategies.SavePantheon.Value}:{strategies.SaveSoulEater.Value}:" +
+                  $"{strategies.SaveRareFracture.Value}:{strategies.SaveRarePossessed.Value}");
+
+        return string.Join('\n', parts);
+    }
+
+    private static string BuildBorderFingerprint(VoyageWindow tree)
+    {
+        var borders = tree?.Data?.BorderMods;
+        if (borders == null || borders.Count < 12)
+            return null;
+        return string.Join('|', borders.Select(mod =>
+            mod == null ? "" : mod.RawName + ":" + string.Join(',', mod.Values)));
+    }
+
+    private void UpdateBorderLootAnalysis(VoyageWindow tree, string boardFingerprint)
+    {
+        var economy = Settings.VoyageSettings.Economy;
+        if (!economy.Enabled.Value)
+        {
+            _borderLootAnalysis = null;
+            _borderAnalysisFingerprint = null;
+            return;
+        }
+
+        var borderFingerprint = BuildBorderFingerprint(tree);
+        if (borderFingerprint == null)
+            return;
+
+        if (_lastObservedBorderFingerprint != null &&
+            !string.Equals(_lastObservedBorderFingerprint, borderFingerprint, StringComparison.Ordinal))
+            _observedBorderRerolls++;
+        _lastObservedBorderFingerprint = borderFingerprint;
+
+        var analysisFingerprint = string.Join('|',
+            boardFingerprint,
+            _observedBorderRerolls,
+            economy.RerollsUsedOffset.Value,
+            economy.SulphurPerChaos.Value,
+            economy.ExpectedRerollScore.Value,
+            economy.ChaosPerLootPoint.Value,
+            economy.RerollSafetyMargin.Value,
+            economy.DivineChaos.Value,
+            economy.AnnulmentChaos.Value,
+            economy.AncientChaos.Value,
+            economy.ExaltedChaos.Value,
+            economy.GemcuttersChaos.Value);
+        if (string.Equals(_borderAnalysisFingerprint, analysisFingerprint, StringComparison.Ordinal))
+            return;
+
+        _borderAnalysisFingerprint = analysisFingerprint;
+        _borderLootAnalysis = BorderLootAnalyzer.Analyze(
+            BuildTileBorders(tree),
+            BuildMapPiecesFromAvailableCharts(),
+            _observedBorderRerolls + economy.RerollsUsedOffset.Value,
+            economy.ToOptions());
+    }
+
+    private static Color BorderTierColor(BorderLootTier tier) => tier switch
+    {
+        BorderLootTier.Divine => new Color(255, 128, 0),
+        BorderLootTier.Rare => new Color(75, 125, 255),
+        BorderLootTier.Moderate => new Color(70, 210, 95),
+        _ => new Color(235, 235, 235),
+    };
+
     private void ShowVoyageOptimizerWindow(VoyageWindow tree, List<VoyageTileElement> tiles)
     {
         if (!ImGui.Begin("Voyage Optimizer"))
@@ -376,49 +1064,11 @@ public partial class DeepwaterEngagementSuite
         }
 
         _voyageSolving = _run is { IsCompleted: false };
-        
+
         if (ImGui.Button("Solve"))
-        {
-            _voyageSolve?.Cancel();
-            _result = null;
-            _selectedSolutionIndex = 0;
-            _voyageNodesExplored = 0;
-            _voyageNodesPruned = 0;
-            _voyageElapsed = 0;
-            _voyageTimedOut = false;
-            _voyageStopwatch = System.Diagnostics.Stopwatch.StartNew();
-            _run = Task.Run(() =>
-            {
-                var pieces = BuildMapPiecesFromAvailableCharts();
-                var tileBorders = BuildTileBorders(tree);
-                var timeLimitSetting = Settings.VoyageSettings.SolverTimeLimitSeconds.Value;
+            StartVoyageSolve(tree);
 
-                var session = new VoyageSolve();
-                _voyageSolve = session;
-
-                foreach (var r in session.Run(
-                             pieces,
-                             tileBorders,
-                             useFastSolver: Settings.VoyageSettings.UseFastSolver.Value,
-                             settings: new VoyagePlannerSettings(TimeLimitSeconds: timeLimitSetting)))
-                {
-                    _result = r;
-                    _voyageNodesExplored = r.NodesExplored;
-                    _voyageNodesPruned = r.NodesPruned;
-                    _uiScorer = session.Scorer;
-                }
-
-                _uiScorer = session.Scorer;
-                LogPlacement(session.Placement);
-
-                if (_voyageStopwatch.Elapsed.TotalSeconds >= timeLimitSetting)
-                    _voyageTimedOut = true;
-
-                _voyageSolving = false;
-            });
-        }
-
-        if (_voyageSolve != null && _voyageSolving && !Settings.VoyageSettings.UseFastSolver.Value)
+        if (_voyageSolve != null && _voyageSolving && !_voyageSolve.CurrentAttemptUsesFastSolver)
         {
             ImGui.SameLine();
             if (ImGui.Button("Cancel"))
@@ -449,24 +1099,41 @@ public partial class DeepwaterEngagementSuite
 
         ImGui.Spacing();
 
-        if (_voyageSolving || _result != null)
+        DrawBorderEconomySummary();
+
+        if (_voyageSolving || _result != null || _lastPlacement != null)
         {
             ImGui.Text($"Nodes: {_voyageNodesExplored:N0} explored, {_voyageNodesPruned:N0} pruned");
+            DrawSolverFallbackStatus();
+            DrawStrategyStatus();
         }
 
         if (_result == null || _result.Solutions.Count == 0)
         {
-            if (_voyageSolving)
+            if (_voyageAutoSolvePending)
+            {
+                var ready = CountReadyCharts(tree);
+                var total = tree.AvailableCharts?.Count ?? 0;
+                ImGui.TextColored(Color.Yellow.ToImguiVec4(),
+                    $"Aguardando charts válidos... ({ready} prontos; {total} slots nas duas abas)");
+            }
+            else if (_voyageSolving)
             {
                 ImGui.TextColored(Color.Yellow.ToImguiVec4(), "Searching...");
             }
             else if (_voyageTimedOut)
             {
                 ImGui.TextColored(Color.Orange.ToImguiVec4(), "Time limit reached - no valid solution found.");
+                DrawStrategyReservationHint();
+            }
+            else if (_lastPlacement != null || _result != null)
+            {
+                ImGui.TextColored(Color.Orange.ToImguiVec4(), "No solutions found.");
+                DrawStrategyReservationHint();
             }
             else
             {
-                ImGui.TextColored(Color.Gray.ToImguiVec4(), "No solutions yet. Press Solve.");
+                ImGui.TextColored(Color.Gray.ToImguiVec4(), "No solutions yet. Opening voyage auto-solves.");
             }
 
             ImGui.End();
@@ -492,6 +1159,15 @@ public partial class DeepwaterEngagementSuite
         ImGui.Spacing();
 
         ImGui.Text($"Score: {currentSolution.TotalScore:F2}");
+        if (_borderLootAnalysis != null)
+        {
+            var layout = VoyageLayoutScorer.Rate(
+                currentSolution.Grid,
+                _borderLootAnalysis.LayoutPreference,
+                Settings.VoyageSettings.Economy.LayoutPreferenceStrength.Value);
+            ImGui.Text($"Loot score: {currentSolution.TotalScore - layout.Bonus:F2}");
+            ImGui.Text($"Layout: {LayoutKindLabel(layout.Kind)} ({layout.Similarity:P0}, +{layout.Bonus:F0})");
+        }
         ImGui.Text($"Valid: {(currentSolution.IsValid ? "Yes" : "No")}");
 
         if (_result.Solutions.Count > 0)
@@ -833,38 +1509,217 @@ public partial class DeepwaterEngagementSuite
             {
                 var setting = Settings.VoyageSettings.BorderModifiers.Content
                     .FirstOrDefault(c => c.Id.Value.Equals(m.RawName, StringComparison.OrdinalIgnoreCase));
+                var isQuantityPerConnection = m.RawName.StartsWith(
+                    "DeepwaterBorderQuantityPerConnection", StringComparison.OrdinalIgnoreCase);
+                var baseAdditive = 0d;
+                var perConnectionAdditive = 0d;
+                if (isQuantityPerConnection)
+                {
+                    // The game exposes two stats on this border: a fixed quantity increase and a
+                    // reduced-quantity penalty per chart connection. They are additive percentages,
+                    // not the legacy "one positive multiplier per connection" formula.
+                    var values = m.Values.Select(v => Math.Abs(v)).Where(v => v > 0).ToList();
+                    if (values.Count >= 2)
+                    {
+                        baseAdditive = values.Max() / 100d;
+                        perConnectionAdditive = -values.Min() / 100d;
+                    }
+                    else if (m.RawName.EndsWith("2", StringComparison.OrdinalIgnoreCase))
+                    {
+                        baseAdditive = 1.50;
+                        perConnectionAdditive = -0.75;
+                    }
+                    else
+                    {
+                        baseAdditive = 1.20;
+                        perConnectionAdditive = -0.50;
+                    }
+                }
+
                 return new BorderEffect(
                     m.RawName,
                     ModifierTagParser.Parse(setting?.Tags.Value, ModifierTag.All),
                     setting?.ValueMultiplier.Value ?? 1,
-                    setting?.PerConnection.Value ?? false,
-                    setting?.AffectsPlacedChart.Value ?? false);
+                    isQuantityPerConnection || (setting?.PerConnection.Value ?? false),
+                    setting?.AffectsPlacedChart.Value ?? false,
+                    baseAdditive,
+                    perConnectionAdditive);
             }).ToList();
         }
 
         return tileBorders;
     }
 
-    private static void LogPlacement(VoyagePlacementRules.Result placement)
+    private void DrawBorderEconomySummary()
     {
+        var analysis = _borderLootAnalysis;
+        if (analysis == null)
+            return;
+
+        ImGui.SeparatorText("Border loot potential");
+        ImGui.TextColored(BorderTierColor(analysis.Tier).ToImguiVec4(),
+            $"{analysis.Tier}: {analysis.Score:0.0}/100");
+        if (_voyageSolve?.FocusAnalysis is { Active.Count: > 0 } focus)
+        {
+            ImGui.TextColored(Color.Orange.ToImguiVec4(), $"Foco escolhido: {focus.Summary}");
+            foreach (var choice in focus.Active)
+                ImGui.TextDisabled($"- {VoyageFocusAnalysis.Label(choice.Kind)}: {choice.Score:0} ({choice.Reason})");
+        }
+        var allowedLayouts = _voyageSolve?.Puzzle?.AllowedLayoutFamilies ??
+                             Settings.VoyageSettings.Layouts.SelectedFamilies();
+        ImGui.Text($"Formatos permitidos: {AllowedLayoutLabel(allowedLayouts)}");
+        ImGui.Text($"Next reroll: {analysis.NextRerollSulphur:N0} sulphur ({analysis.NextRerollChaos:0.0}c)");
+        ImGui.Text($"Expected improvement: {analysis.ExpectedUpgradePoints:0.0} points ({analysis.ExpectedUpgradeChaos:0.0}c)");
+        ImGui.TextColored(
+            (analysis.RecommendReroll ? Color.Orange : Color.Green).ToImguiVec4(),
+            analysis.RecommendationReason);
+
+        if (analysis.Combos.Count > 0)
+        {
+            ImGui.TextDisabled("Detected combos:");
+            foreach (var combo in analysis.Combos)
+                ImGui.BulletText(combo);
+        }
+
+        if (ImGui.SmallButton($"Reset observed rerolls ({_observedBorderRerolls})"))
+        {
+            _observedBorderRerolls = 0;
+            _borderAnalysisFingerprint = null;
+        }
+
+        ImGui.Spacing();
+    }
+
+    private static string LayoutKindLabel(VoyageLayoutKind kind) => kind switch
+    {
+        VoyageLayoutKind.SnakeS => "S",
+        VoyageLayoutKind.Dollar => "$",
+        VoyageLayoutKind.Compact => "Compact",
+        VoyageLayoutKind.StraightLines => "Straight lines",
+        _ => "Other",
+    };
+
+    private static string AllowedLayoutLabel(VoyageLayoutFamilies families)
+    {
+        if (families is VoyageLayoutFamilies.All or VoyageLayoutFamilies.None)
+            return "todos (exceção premium ou nenhuma restrição)";
+        var labels = new List<string>();
+        if (families.HasFlag(VoyageLayoutFamilies.SnakeDollar)) labels.Add("S/$");
+        if (families.HasFlag(VoyageLayoutFamilies.Compact)) labels.Add("compacto +");
+        if (families.HasFlag(VoyageLayoutFamilies.StraightLines)) labels.Add("linhas retas");
+        return string.Join(" + ", labels);
+    }
+
+    private void DrawSolverFallbackStatus()
+    {
+        var solve = _voyageSolve;
+        if (solve == null || solve.InputPieceCount <= 0)
+            return;
+
+        ImGui.Text($"Charts: {solve.InputPieceCount} total, {solve.SolverPieceCount} searching, " +
+                   $"{solve.ReservedPieceCount} reserved, {solve.LockedPlacementCount} locked");
+
+        var color = _result?.Solutions is { Count: > 0 }
+            ? Color.Green.ToImguiVec4()
+            : Color.Yellow.ToImguiVec4();
+        switch (solve.FallbackStage)
+        {
+            case VoyageSolveFallbackStage.FastAfterSlow:
+                ImGui.TextColored(color, "Fallback: exact fast solver after slow search.");
+                break;
+            case VoyageSolveFallbackStage.ReservationsRelaxed:
+                ImGui.TextColored(color,
+                    $"Fallback: restored {solve.InitialReservedPieceCount} reserved charts; strategic locks kept.");
+                break;
+            case VoyageSolveFallbackStage.StrategyLocksRelaxed:
+                ImGui.TextColored(color,
+                    "Final fallback: reservations restored and strategy locks relaxed.");
+                break;
+        }
+    }
+
+    private void DrawStrategyStatus()
+    {
+        var placement = _lastPlacement ?? _voyageSolve?.Placement;
         if (placement == null)
             return;
 
+        var names = DescribeActiveStrategies(placement);
+        if (names.Count == 0)
+        {
+            ImGui.TextColored(Color.Gray.ToImguiVec4(), "Free");
+            return;
+        }
+
+        foreach (var name in names)
+            ImGui.TextColored(Color.Orange.ToImguiVec4(), name);
+
+        if (names.Any(x => x.Contains("Strongbox Rare Engine", StringComparison.Ordinal)))
+        {
+            ImGui.TextColored(Color.Yellow.ToImguiVec4(),
+                "Strongboxes no tile premiado: procure 'Guarded by 3 Rare Monsters'.");
+            ImGui.TextColored(Color.Gray.ToImguiVec4(),
+                "Leve Chaos + Alchemy/Scouring; 'Stream of Monsters' e o segundo melhor mod.");
+        }
+    }
+
+    private static List<string> DescribeActiveStrategies(VoyagePlacementRules.Result placement)
+    {
+        if (placement?.ActiveStrategies is { Count: > 0 } active)
+            return active.ToList();
+        return [];
+    }
+
+    private void DrawStrategyReservationHint()
+    {
+        var placement = _lastPlacement ?? _voyageSolve?.Placement;
+        var savedBits = FormatSavedChartBits(placement);
+        if (savedBits.Count == 0)
+            return;
+
+        ImGui.TextColored(Color.Yellow.ToImguiVec4(), "Reserving:");
+        foreach (var bit in savedBits)
+            ImGui.TextColored(Color.Yellow.ToImguiVec4(), $"- {bit}");
+    }
+
+    private static List<string> FormatSavedChartBits(VoyagePlacementRules.Result placement)
+    {
         var savedBits = new List<string>();
+        if (placement == null)
+            return savedBits;
+
         if (placement.SavedKisharaCount > 0)
-            savedBits.Add($"{placement.SavedKisharaCount} Kishara (place boss yourself)");
+            savedBits.Add($"{placement.SavedKisharaCount} Kishara");
+        if (placement.SavedNoEquipmentCount > 0)
+            savedBits.Add($"{placement.SavedNoEquipmentCount} No Equipment");
+        if (placement.SavedFracturedCount > 0)
+            savedBits.Add($"{placement.SavedFracturedCount} Fractured");
+        if (placement.SavedGoldenLanternsCount > 0)
+            savedBits.Add($"{placement.SavedGoldenLanternsCount} Golden Lanterns");
+        if (placement.SavedPantheonCount > 0)
+            savedBits.Add($"{placement.SavedPantheonCount} Pantheon");
+        if (placement.SavedSoulEaterCount > 0)
+            savedBits.Add($"{placement.SavedSoulEaterCount} Soul Eater");
+        if (placement.SavedRareFractureCount > 0)
+            savedBits.Add($"{placement.SavedRareFractureCount} Rare Fracture");
+        if (placement.SavedRarePossessedCount > 0)
+            savedBits.Add($"{placement.SavedRarePossessedCount} Rare Possessed");
         if (placement.SavedPelagicCount > 0)
             savedBits.Add($"{placement.SavedPelagicCount} Pelagic");
         if (placement.SavedFarmCount > 0)
-            savedBits.Add($"{placement.SavedFarmCount} Anchorfield (no-consume)");
+            savedBits.Add($"{placement.SavedFarmCount} Anchorfield");
         if (placement.SavedClamCount > 0)
-            savedBits.Add($"{placement.SavedClamCount} Clam (for Unique Amulet2)");
+            savedBits.Add($"{placement.SavedClamCount} Clam");
         if (placement.SavedUniqueAmuletCount > 0)
             savedBits.Add($"{placement.SavedUniqueAmuletCount} Unique Amulet2");
+        if (placement.SavedUniqueBeltCount > 0)
+            savedBits.Add($"{placement.SavedUniqueBeltCount} Unique Belt");
+        if (placement.SavedUniqueRingCount > 0)
+            savedBits.Add($"{placement.SavedUniqueRingCount} Unique Ring");
         if (placement.SavedStrongboxCount > 0)
-            savedBits.Add($"{placement.SavedStrongboxCount} boxes (Strongboxes/Diviner/Arcanist)");
+            savedBits.Add($"{placement.SavedStrongboxCount} boxes");
         if (placement.SavedOperativeBoxCount > 0)
-            savedBits.Add($"{placement.SavedOperativeBoxCount} Operative boxes");
+            savedBits.Add($"{placement.SavedOperativeBoxCount} Operative");
         if (placement.SavedStarfishCount > 0)
             savedBits.Add($"{placement.SavedStarfishCount} Starfish");
         if (placement.SavedAdjacentRareCount > 0)
@@ -873,6 +1728,21 @@ public partial class DeepwaterEngagementSuite
             savedBits.Add($"{placement.SavedRareVoyageCount} voyage rares");
         if (placement.SavedLostMessageCount > 0)
             savedBits.Add($"{placement.SavedLostMessageCount} Lost Message");
+        if (placement.SavedSulphurCount > 0)
+            savedBits.Add($"{placement.SavedSulphurCount} Sulphur global");
+        if (placement.SavedBrineKingCount > 0)
+            savedBits.Add($"{placement.SavedBrineKingCount} Brine King's Domain");
+        if (placement.SavedSeaPillarsCount > 0)
+            savedBits.Add($"{placement.SavedSeaPillarsCount} Sea Pillars");
+        return savedBits;
+    }
+
+    private static void LogPlacement(VoyagePlacementRules.Result placement)
+    {
+        if (placement == null)
+            return;
+
+        var savedBits = FormatSavedChartBits(placement);
         if (savedBits.Count > 0)
             DebugWindow.LogMsg($"Voyage: saved {string.Join(", ", savedBits)} for better borders", 5);
         if (placement.Locks.Count > 0)

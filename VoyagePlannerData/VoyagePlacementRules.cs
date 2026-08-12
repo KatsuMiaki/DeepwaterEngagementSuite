@@ -9,14 +9,21 @@ public static class VoyagePlacementRules
     public const string NotConsume1 = "DeepwaterBorderChanceToNotConsumeChart1";
     public const string NotConsume2 = "DeepwaterBorderChanceToNotConsumeChart2";
     public const string RareDivine = "DeepwaterBorderRareMonsterDivine";
+    public const string RareExalted = "DeepwaterBorderRareMonsterExalted";
     public const string RareAnnul = "DeepwaterBorderRareMonsterAnnulment";
     public const string RareAncient = "DeepwaterBorderRareMonsterAncient";
-    public const string MoreScarabs2 = "DeepwaterBorderMoreScarabs2";
-    public const string MoreScarabs3 = "DeepwaterBorderMoreScarabs3";
     public const string TreasureAnchors1 = "DeepwaterBorderTreasureAnchors1";
     public const string TreasureAnchors2 = "DeepwaterBorderTreasureAnchors2";
 
     public const string VoyageIncreasedRareMonsters = "MapDeepwaterChartVoyageIncreasedRareMonsters";
+    public const string VoyageResourceFoundPrefix = "MapDeepwaterChartVoyageResourceFound";
+    public const string VoyageNoEquipmentDrops = "MapDeepwaterChartVoyageNoEquipmentDrops";
+    public const string VoyageSoulEater = "MapDeepwaterChartVoyageSoulEater";
+    public const string VoyageRareFracture = "MapDeepwaterChartVoyageRareFracture";
+    public const string VoyageMonstersPossessed = "MapDeepwaterChartVoyageMonstersPossessed";
+    public const string AdjacentFracturedPrefix = "MapDeepwaterChartAdjacentFractured";
+    public const string AdjacentGoldenLanternsPrefix = "MapDeepwaterChartAdjacentGoldenLanterns";
+    public const string AdjacentPantheonPrefix = "MapDeepwaterChartAdjacentPantheon";
     public const string AdjacentStrongboxesPrefix = "MapDeepwaterChartAdjacentStrongboxes";
     public const string AdjacentStarfishPrefix = "MapDeepwaterChartAdjacentStarfish";
     public const string AdjacentIncreasedRarePrefix = "MapDeepwaterChartAdjacentIncreasedRareMonsters";
@@ -25,19 +32,25 @@ public static class VoyagePlacementRules
     public const string AdjacentOperativeBoxPrefix = "MapDeepwaterChartAdjacentOperativeBox";
     public const string AdjacentLostMessagePrefix = "MapDeepwaterChartAdjacentLostMessage";
     public const string AdjacentUniqueAmuletPrefix = "MapDeepwaterChartAdjacentUniqueAmulet";
+    public const string AdjacentUniqueBeltPrefix = "MapDeepwaterChartAdjacentUniqueBelt";
+    public const string AdjacentUniqueRingPrefix = "MapDeepwaterChartAdjacentUniqueRing";
 
     public const int CenterRow = 1;
     public const int CenterCol = 1;
 
     public const int MaxSavedBoxes = 6;
     public const int MaxSavedStarfish = 6;
+    public const int MaxSavedRareVoyage = 5;
+    public const int MaxSavedPelagic = 2;
     public const int MaxSavedUniqueAmulet2 = 1;
-    public const int MaxSavedClamsForAmulet = 4;
+    public const int MaxSavedClamsForAmulet = 3;
 
     public const string PelagicRoomName = "Pelagic Abyss";
     public const string ClamRoomName = "Clam-infested Shelf";
     public const string AnchorfieldRoomName = "Anchorfield";
     public const string KisharaRoomName = "Kishara's Rest";
+    public const string BrineKingRoomName = "Brine King's Domain";
+    public const string SeaPillarsRoomName = "Sea Pillars";
 
     private static readonly (int Dr, int Dc)[] Ortho = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
@@ -52,38 +65,117 @@ public static class VoyagePlacementRules
         int SavedAdjacentRareCount,
         int SavedOperativeBoxCount,
         int SavedLostMessageCount,
+        int SavedSulphurCount,
         int SavedKisharaCount,
+        int SavedNoEquipmentCount,
+        int SavedFracturedCount,
+        int SavedGoldenLanternsCount,
+        int SavedPantheonCount,
+        int SavedSoulEaterCount,
+        int SavedRareFractureCount,
+        int SavedRarePossessedCount,
         int SavedClamCount,
-        int SavedUniqueAmuletCount);
+        int SavedUniqueAmuletCount,
+        int SavedUniqueBeltCount,
+        int SavedUniqueRingCount,
+        int SavedBrineKingCount,
+        int SavedSeaPillarsCount,
+        bool AmuletClamHubActive = false,
+        bool PreferClamsAdjacentToAmulet = false,
+        bool NoConsumeActive = false,
+        bool BrineKingSynergyActive = false,
+        IReadOnlyList<string> ActiveStrategies = null);
+
+    public const double ClamAdjacentToAmuletMultiplier = 1_000_000d;
+
+    public static readonly (int Row, int Col)[] SacrificeCorners = [(2, 0), (2, 2), (0, 2)];
+
+    public static bool IsSacrificeCorner(int row, int col) =>
+        (row, col) is (2, 0) or (2, 2) or (0, 2);
 
     public static Result Apply(
         IReadOnlyList<MapPiece> pieces,
-        IReadOnlyList<BorderEffect>[,] tileBorders)
+        IReadOnlyList<BorderEffect>[,] tileBorders,
+        VoyageStrategyOptions options = null,
+        bool reserveCharts = true,
+        bool disablePlacementRules = false)
     {
+        if (disablePlacementRules)
+        {
+            return new Result(
+                Pieces: pieces.ToList(),
+                Locks: [],
+                SavedPelagicCount: 0,
+                SavedFarmCount: 0,
+                SavedStrongboxCount: 0,
+                SavedStarfishCount: 0,
+                SavedRareVoyageCount: 0,
+                SavedAdjacentRareCount: 0,
+                SavedOperativeBoxCount: 0,
+                SavedLostMessageCount: 0,
+                SavedSulphurCount: 0,
+                SavedKisharaCount: 0,
+                SavedNoEquipmentCount: 0,
+                SavedFracturedCount: 0,
+                SavedGoldenLanternsCount: 0,
+                SavedPantheonCount: 0,
+                SavedSoulEaterCount: 0,
+                SavedRareFractureCount: 0,
+                SavedRarePossessedCount: 0,
+                SavedClamCount: 0,
+                SavedUniqueAmuletCount: 0,
+                SavedUniqueBeltCount: 0,
+                SavedUniqueRingCount: 0,
+                SavedBrineKingCount: 0,
+                SavedSeaPillarsCount: 0,
+                ActiveStrategies: []);
+        }
+
+        options ??= VoyageStrategyOptions.AllEnabled;
         var working = pieces.ToList();
         var locks = new List<LockedPlacement>();
         var usedPieceIds = new HashSet<int>();
         var lockedCells = new HashSet<(int Row, int Col)>();
 
-        void LockCell(int row, int col, MapPiece piece)
+        void LockCell(int row, int col, MapPiece piece, int? rotation = null)
         {
             if (!usedPieceIds.Add(piece.Id))
                 return;
-            locks.Add(new LockedPlacement(row, col, piece.Id));
+            locks.Add(new LockedPlacement(row, col, piece.Id, rotation));
             lockedCells.Add((row, col));
         }
 
         bool CellFree(int row, int col) => !lockedCells.Contains((row, col));
 
-        var savedKishara = 0;
-        foreach (var boss in working.Where(IsKishara).Select(p => p.Id).ToList())
+        int SaveByPredicate(bool enabled, Func<MapPiece, bool> pred)
         {
-            if (!TrySavePiece(working, boss))
-                break;
-            savedKishara++;
+            if (!enabled || !reserveCharts)
+                return 0;
+            var saved = 0;
+            foreach (var id in working.Where(pred).Select(p => p.Id).ToList())
+            {
+                if (!TrySavePiece(working, id))
+                    break;
+                saved++;
+            }
+            return saved;
         }
 
+        var savedKishara = SaveByPredicate(options.SaveKishara, IsKishara);
+        var savedNoEquipment = SaveByPredicate(options.SaveNoEquipment, IsNoEquipmentChart);
+        var savedFractured = SaveByPredicate(options.SaveFractured, IsFracturedChart);
+        var savedGoldenLanterns = SaveByPredicate(options.SaveGoldenLanterns, IsGoldenLanternsChart);
+        var savedPantheon = SaveByPredicate(options.SavePantheon, IsPantheonChart);
+        var savedSoulEater = SaveByPredicate(options.SaveSoulEater, IsSoulEaterChart);
+        var savedRareFracture = SaveByPredicate(options.SaveRareFracture, IsRareFractureChart);
+        var savedRarePossessed = SaveByPredicate(options.SaveRarePossessed, IsRarePossessedChart);
+
         var divineCenters = EnumerateCells()
+            .Where(c => OrbPriority(BordersAt(tileBorders, c.Row, c.Col)) == 4)
+            .Select(c => (c.Row, c.Col))
+            .ToList();
+
+        var exaltedCenters = EnumerateCells()
             .Where(c => OrbPriority(BordersAt(tileBorders, c.Row, c.Col)) == 3)
             .Select(c => (c.Row, c.Col))
             .ToList();
@@ -98,138 +190,534 @@ public static class VoyagePlacementRules
             .Select(c => (c.Row, c.Col))
             .ToList();
 
-        var orbCenters = divineCenters.Select(c => (c.Row, c.Col, Priority: 3))
+        var orbCenters = divineCenters.Select(c => (c.Row, c.Col, Priority: 4))
+            .Concat(exaltedCenters.Select(c => (c.Row, c.Col, Priority: 3)))
             .Concat(annulCenters.Select(c => (c.Row, c.Col, Priority: 2)))
             .Concat(ancientCenters.Select(c => (c.Row, c.Col, Priority: 1)))
             .OrderByDescending(x => x.Priority)
             .ToList();
 
-        var savedPelagic = 0;
-        foreach (var pelagic in working.Where(IsPelagic).OrderByDescending(p => p.LocalModifier + p.GlobalModifier).ToList())
-        {
-            if (usedPieceIds.Contains(pelagic.Id))
-                continue;
+        var clamCountAtStart = working.Count(p => !usedPieceIds.Contains(p.Id) && IsClamChart(p));
+        var surplusClams = clamCountAtStart > MaxSavedClamsForAmulet;
+        var hasOrbs = orbCenters.Count > 0;
+        var strongTreasure = BoardHasStrongTreasureAnchors(tileBorders);
+        var spendStrongboxesNow = hasOrbs;
+        var spendLostMessagesNow = options.DedicatedMessageActive;
+        var spendSulphurNow = options.SulphurStrategyActive;
 
+        // The rewarded tile is the kill chamber. Sea Pillars supplies natural density there;
+        // adjacent charts then inject rollable strongboxes into the same rare-currency area.
+        var seaPillarsStrongboxEngineActive = false;
+        if (options.RareMonstersDrop && options.RareCurrencyStrongboxEngine && hasOrbs)
+        {
             var target = orbCenters.FirstOrDefault(c => CellFree(c.Row, c.Col));
             if (target.Priority > 0)
             {
-                LockCell(target.Row, target.Col, pelagic);
-                orbCenters.RemoveAll(c => c.Row == target.Row && c.Col == target.Col);
-            }
-            else if (TrySavePiece(working, pelagic.Id))
-            {
-                savedPelagic++;
-            }
-        }
-
-        // Unique Amulet2 + 4 Clams: amulet center, clams on ortho neighbors.
-        if (CellFree(CenterRow, CenterCol))
-        {
-            var amulet2 = TakeBest(working, usedPieceIds, IsUniqueAmulet2Chart, UniqueAmuletScore);
-            var freeCross = FreeNeighbors(CenterRow, CenterCol, CellFree).ToList();
-            if (amulet2 != null && freeCross.Count >= 4)
-            {
-                var clams = working
-                    .Where(p => !usedPieceIds.Contains(p.Id) && IsClamChart(p))
-                    .OrderByDescending(ClamScore)
-                    .ThenByDescending(p => p.LocalModifier + p.GlobalModifier)
-                    .Take(MaxSavedClamsForAmulet)
-                    .ToList();
-                if (clams.Count >= MaxSavedClamsForAmulet)
+                var seaPillars = TakeBest(working, usedPieceIds, IsSeaPillars, SeaPillarsScore);
+                if (seaPillars != null)
                 {
-                    LockCell(CenterRow, CenterCol, amulet2);
-                    for (var i = 0; i < MaxSavedClamsForAmulet; i++)
-                        LockCell(freeCross[i].Row, freeCross[i].Col, clams[i]);
+                    LockCell(target.Row, target.Col, seaPillars);
+                    seaPillarsStrongboxEngineActive = true;
+
+                    foreach (var neighbor in FreeNeighbors(target.Row, target.Col, CellFree))
+                    {
+                        var box = TakeBest(working, usedPieceIds, IsStrongboxCountChart, BoxValue1Score);
+                        if (box == null)
+                            break;
+                        LockCell(neighbor.Row, neighbor.Col, box);
+                    }
+
+                    foreach (var cell in EnumerateCells()
+                                 .Where(c => CellFree(c.Row, c.Col))
+                                 .OrderByDescending(c => HasChartEffectBorder(BordersAt(tileBorders, c.Row, c.Col)))
+                                 .ThenByDescending(c => InGridDegree(c.Row, c.Col)))
+                    {
+                        var globalRare = TakeBest(working, usedPieceIds, IsRareVoyageChart, RareVoyageScore);
+                        if (globalRare == null)
+                            break;
+                        LockCell(cell.Row, cell.Col, globalRare);
+                    }
                 }
             }
         }
 
-        foreach (var center in divineCenters)
+        var brineKingSynergyActive = false;
+        if (options.ProtectBrineKing && options.UseBrineKingSynergy && options.RareMonstersDrop)
         {
-            foreach (var n in FreeNeighbors(center.Row, center.Col, CellFree))
+            var rareBoostTargets = EnumerateCells()
+                .Where(c => CellFree(c.Row, c.Col) && HasRareMonsterBoostBorder(BordersAt(tileBorders, c.Row, c.Col)))
+                .OrderByDescending(c => OrbPriority(BordersAt(tileBorders, c.Row, c.Col)))
+                .ThenByDescending(c => InGridDegree(c.Row, c.Col))
+                .ToList();
+
+            foreach (var brine in working.Where(IsBrineKingsDomain)
+                         .OrderByDescending(BrineKingScore).ToList())
+            {
+                if (usedPieceIds.Contains(brine.Id) || rareBoostTargets.Count == 0)
+                    continue;
+                var target = rareBoostTargets[0];
+                rareBoostTargets.RemoveAt(0);
+                LockCell(target.Row, target.Col, brine);
+                orbCenters.RemoveAll(c => c.Row == target.Row && c.Col == target.Col);
+                brineKingSynergyActive = true;
+
+                // Brine King does not use the Strongbox engine. Its own monster population is
+                // amplified by adjacent rare-monster/Starfish charts instead.
+                foreach (var neighbor in FreeNeighbors(target.Row, target.Col, CellFree))
+                {
+                    var support = TakeBest(working, usedPieceIds, IsAdjacentRareChart, AdjacentRareScore)
+                                  ?? TakeBest(working, usedPieceIds, IsStarfishChart, StarfishScore);
+                    if (support == null)
+                        break;
+                    LockCell(neighbor.Row, neighbor.Col, support);
+                }
+            }
+
+            foreach (var cell in EnumerateCells()
+                         .Where(c => CellFree(c.Row, c.Col))
+                         .OrderByDescending(c => HasChartEffectBorder(BordersAt(tileBorders, c.Row, c.Col)))
+                         .ThenByDescending(c => InGridDegree(c.Row, c.Col)))
+            {
+                var globalRare = TakeBest(working, usedPieceIds, IsRareVoyageChart, RareVoyageScore);
+                if (globalRare == null)
+                    break;
+                LockCell(cell.Row, cell.Col, globalRare);
+            }
+        }
+
+        var messageStrategyActive = false;
+        if (options.DedicatedMessageActive && CellFree(CenterRow, CenterCol))
+        {
+            var messages = working
+                .Where(p => !usedPieceIds.Contains(p.Id) && IsLostMessageChart(p))
+                .OrderByDescending(LostMessageScore)
+                .Take(8)
+                .ToList();
+            if (messages.Count >= Math.Max(2, options.MinimumLostMessageCharts))
+            {
+                var target = working
+                    .Where(p => !usedPieceIds.Contains(p.Id) && !IsLostMessageChart(p) && !IsPantheonChart(p))
+                    .OrderByDescending(p => p.LocalModifier + p.GlobalModifier)
+                    .FirstOrDefault();
+                if (target != null)
+                {
+                    LockCell(CenterRow, CenterCol, target);
+                    var primaryMessages = messages.Take(4).ToList();
+                    foreach (var pair in FreeNeighbors(CenterRow, CenterCol, CellFree).Zip(primaryMessages))
+                        LockCell(pair.First.Row, pair.First.Col, pair.Second);
+                    foreach (var message in messages.Skip(primaryMessages.Count))
+                    {
+                        var cell = EnumerateCells().FirstOrDefault(c => CellFree(c.Row, c.Col));
+                        if (!CellFree(cell.Row, cell.Col))
+                            break;
+                        LockCell(cell.Row, cell.Col, message);
+                    }
+                    messageStrategyActive = true;
+                }
+            }
+        }
+
+        var sulphurStrategyActive = false;
+        if (options.SulphurStrategyActive)
+        {
+            foreach (var cell in EnumerateCells()
+                         .Where(c => CellFree(c.Row, c.Col))
+                         .OrderByDescending(c => HasChartEffectBorder(BordersAt(tileBorders, c.Row, c.Col)))
+                         .ThenByDescending(c => InGridDegree(c.Row, c.Col)))
+            {
+                var sulphur = TakeBest(working, usedPieceIds, IsSulphurChart, SulphurChartScore);
+                if (sulphur == null)
+                    break;
+                LockCell(cell.Row, cell.Col, sulphur);
+                sulphurStrategyActive = true;
+            }
+        }
+
+        var groundLootStrategyActive = false;
+        if (options.GroundLootStrategyActive)
+        {
+            var target = EnumerateCells()
+                .Where(c => CellFree(c.Row, c.Col))
+                .OrderByDescending(c => HasRareMonsterBoostBorder(BordersAt(tileBorders, c.Row, c.Col)))
+                .ThenByDescending(c => InGridDegree(c.Row, c.Col))
+                .FirstOrDefault();
+            var seaPillars = TakeBest(working, usedPieceIds, IsSeaPillars, SeaPillarsScore);
+            if (seaPillars != null)
+            {
+                LockCell(target.Row, target.Col, seaPillars);
+                groundLootStrategyActive = true;
+                foreach (var neighbor in FreeNeighbors(target.Row, target.Col, CellFree))
+                {
+                    var support = TakeBest(working, usedPieceIds, IsStarfishChart, StarfishScore)
+                                  ?? TakeBest(working, usedPieceIds, IsGoldenLanternsChart, p => p.LocalModifier + p.GlobalModifier);
+                    if (support == null)
+                        break;
+                    LockCell(neighbor.Row, neighbor.Col, support);
+                }
+            }
+
+            foreach (var global in working
+                         .Where(p => !usedPieceIds.Contains(p.Id) &&
+                                     (IsNoEquipmentChart(p) || IsRarePossessedChart(p)))
+                         .OrderByDescending(p => p.LocalModifier + p.GlobalModifier)
+                         .ToList())
+            {
+                var cell = EnumerateCells().FirstOrDefault(c => CellFree(c.Row, c.Col));
+                if (!CellFree(cell.Row, cell.Col))
+                    break;
+                LockCell(cell.Row, cell.Col, global);
+            }
+        }
+
+        var amuletCrossLocked = false;
+        var preferClamsAdjacentToAmulet = false;
+        var amuletCenterLocked = false;
+        if (CellFree(CenterRow, CenterCol))
+        {
+            if (options.UniqueAmuletClamCross && !strongTreasure && !hasOrbs)
+            {
+                amuletCrossLocked = TryLockAmuletClamHub(
+                    working, usedPieceIds, CellFree, LockCell);
+            }
+            else if (!options.UniqueAmuletClamCross)
+            {
+                preferClamsAdjacentToAmulet = TryLockUniqueAmulet2Center(
+                    working, usedPieceIds, LockCell);
+                amuletCenterLocked = preferClamsAdjacentToAmulet;
+            }
+        }
+
+        var savedPelagic = 0;
+        var pelagicLocked = false;
+        if (options.RareMonstersDrop)
+        {
+            foreach (var pelagic in working.Where(IsPelagic)
+                         .OrderByDescending(p => p.LocalModifier + p.GlobalModifier).ToList())
+            {
+                if (usedPieceIds.Contains(pelagic.Id))
+                    continue;
+
+                var target = orbCenters.FirstOrDefault(c => CellFree(c.Row, c.Col));
+                if (target.Priority > 0)
+                {
+                    LockCell(target.Row, target.Col, pelagic);
+                    orbCenters.RemoveAll(c => c.Row == target.Row && c.Col == target.Col);
+                    pelagicLocked = true;
+                }
+                else if (reserveCharts && savedPelagic < MaxSavedPelagic && TrySavePiece(working, pelagic.Id))
+                {
+                    savedPelagic++;
+                }
+            }
+        }
+
+        if (options.RareMonstersDrop && hasOrbs && !seaPillarsStrongboxEngineActive)
+        {
+            var fallbackTarget = divineCenters.Select(c => (c.Row, c.Col, Priority: 4))
+                .Concat(exaltedCenters.Select(c => (c.Row, c.Col, Priority: 3)))
+                .Concat(annulCenters.Select(c => (c.Row, c.Col, Priority: 2)))
+                .Concat(ancientCenters.Select(c => (c.Row, c.Col, Priority: 1)))
+                .OrderByDescending(x => x.Priority)
+                .ThenByDescending(x => InGridDegree(x.Row, x.Col))
+                .FirstOrDefault();
+
+            foreach (var n in FreeNeighbors(fallbackTarget.Row, fallbackTarget.Col, CellFree))
             {
                 var support = TakeBest(working, usedPieceIds, IsStrongboxCountChart, BoxValue1Score)
                               ?? TakeBest(working, usedPieceIds, IsStarfishChart, StarfishScore)
-                              ?? TakeBest(working, usedPieceIds, IsOrbRareComboChart, OrbRareComboScore);
-                if (support == null) break;
+                              ?? TakeBest(working, usedPieceIds, IsAdjacentRareChart, AdjacentRareScore);
+                if (support == null)
+                    break;
                 LockCell(n.Row, n.Col, support);
             }
-        }
 
-        foreach (var center in annulCenters)
-        {
-            foreach (var n in FreeNeighbors(center.Row, center.Col, CellFree))
+            foreach (var cell in EnumerateCells()
+                         .Where(c => CellFree(c.Row, c.Col))
+                         .OrderByDescending(c => HasChartEffectBorder(BordersAt(tileBorders, c.Row, c.Col)))
+                         .ThenByDescending(c => InGridDegree(c.Row, c.Col)))
             {
-                var support = TakeBest(working, usedPieceIds, IsStarfishChart, StarfishScore)
-                              ?? TakeBest(working, usedPieceIds, IsOrbRareComboChart, OrbRareComboScore);
-                if (support == null) break;
-                LockCell(n.Row, n.Col, support);
-            }
-        }
-
-        foreach (var center in ancientCenters)
-        {
-            foreach (var n in FreeNeighbors(center.Row, center.Col, CellFree))
-            {
-                var support = TakeBest(working, usedPieceIds, IsStarfishChart, StarfishScore)
-                              ?? TakeBest(working, usedPieceIds, IsOrbRareComboChart, OrbRareComboScore);
-                if (support == null) break;
-                LockCell(n.Row, n.Col, support);
-            }
-        }
-
-        foreach (var cell in EnumerateCells().Where(c =>
-                     CellFree(c.Row, c.Col) &&
-                     IsStrongNoConsume(BordersAt(tileBorders, c.Row, c.Col))))
-        {
-            var farm = TakeBest(working, usedPieceIds, IsAnchorfieldChart, FarmPriority);
-            if (farm == null) break;
-            LockCell(cell.Row, cell.Col, farm);
-        }
-
-        if (CellFree(CenterRow, CenterCol))
-        {
-            var centerPiece = TakeBest(working, usedPieceIds, IsOperativeBoxChart, OperativeBoxScore)
-                              ?? TakeBest(working, usedPieceIds, IsLostMessageChart, LostMessageScore)
-                              ?? TakeBest(working, usedPieceIds, IsUniqueAmulet1Chart, UniqueAmuletScore);
-            if (centerPiece != null)
-                LockCell(CenterRow, CenterCol, centerPiece);
-        }
-
-        if (divineCenters.Count > 0)
-        {
-            foreach (var cell in EnumerateCells().Where(c => CellFree(c.Row, c.Col)))
-            {
-                var rare = TakeBest(working, usedPieceIds, IsOrbRareGlobalChart, OrbRareComboScore);
+                var rare = TakeBest(working, usedPieceIds, IsRareVoyageChart, RareVoyageScore);
                 if (rare == null)
                     break;
                 LockCell(cell.Row, cell.Col, rare);
             }
         }
 
-        var savedFarm = RemoveUnused(working, usedPieceIds, IsAnchorfieldChart, FarmPriority);
-        var savedStrongbox = RemoveUnused(working, usedPieceIds, IsStrongboxCountChart,
-            BoxValue1Score, maxSave: MaxSavedBoxes);
-        var savedStarfish = RemoveUnused(working, usedPieceIds, IsStarfishChart,
-            StarfishScore, maxSave: MaxSavedStarfish);
-        var savedAdjacentRare = RemoveUnused(working, usedPieceIds, IsAdjacentRareSaveChart);
-        var savedRareVoyage = RemoveUnused(working, usedPieceIds, IsRareVoyageChart);
-        var savedOperative = RemoveUnused(working, usedPieceIds, IsOperativeBoxChart);
-        var savedLostMessage = RemoveUnused(working, usedPieceIds, IsLostMessageChart);
-        // Hold one T2 amulet until the 4-clam cross is ready; never save T1.
-        var savedUniqueAmulet = RemoveUnused(working, usedPieceIds, IsUniqueAmulet2Chart,
-            UniqueAmuletScore, maxSave: MaxSavedUniqueAmulet2);
-        var holdingAmulet2 = savedUniqueAmulet > 0 ||
-                             working.Any(p => !usedPieceIds.Contains(p.Id) && IsUniqueAmulet2Chart(p));
-        var savedClam = holdingAmulet2
-            ? RemoveUnused(working, usedPieceIds, IsClamChart, ClamScore, maxSave: MaxSavedClamsForAmulet)
+        if (options.CenterSpecialty && CellFree(CenterRow, CenterCol))
+        {
+            var centerPiece = TakeBest(working, usedPieceIds, IsOperativeBoxChart, OperativeBoxScore)
+                              ?? TakeBest(working, usedPieceIds, IsLostMessageChart, LostMessageScore)
+                              ?? TakeBest(working, usedPieceIds, IsUniqueAmulet1Chart, UniqueAmuletScore)
+                              ?? TakeBest(working, usedPieceIds, IsUniqueBeltChart, UniqueBeltScore)
+                              ?? TakeBest(working, usedPieceIds, IsUniqueRingChart, UniqueRingScore);
+            if (centerPiece != null)
+                LockCell(CenterRow, CenterCol, centerPiece);
+        }
+
+        var noConsumeActive = false;
+        if (options.NoConsumeAnchorfield &&
+            !strongTreasure &&
+            !hasOrbs &&
+            !amuletCrossLocked)
+        {
+            foreach (var cell in EnumerateCells().Where(c =>
+                         CellFree(c.Row, c.Col) &&
+                         IsStrongNoConsume(BordersAt(tileBorders, c.Row, c.Col))))
+            {
+                var farm = TakeBest(working, usedPieceIds, IsSoulEaterChart, SoulEaterScore)
+                           ?? TakeBest(working, usedPieceIds, IsAnchorfieldChart, FarmPriority);
+                if (farm == null && surplusClams)
+                    farm = TakeBest(working, usedPieceIds, IsClamChart, ClamScore);
+                if (farm == null) break;
+                LockCell(cell.Row, cell.Col, farm);
+                noConsumeActive = true;
+            }
+        }
+
+        var savedFarm = reserveCharts && options.NoConsumeAnchorfield
+            ? RemoveUnused(working, usedPieceIds, IsAnchorfieldChart, FarmPriority)
             : 0;
+
+        var savedStrongbox = 0;
+        var savedStarfish = 0;
+        var savedAdjacentRare = 0;
+        var savedRareVoyage = 0;
+        if (reserveCharts && options.ReserveStrongboxesForValuableCurrency && !spendStrongboxesNow)
+        {
+            savedStrongbox = RemoveUnused(working, usedPieceIds, IsStrongboxCountChart,
+                BoxValue1Score, maxSave: Math.Clamp(options.SaveStrongboxes, 0, 120));
+        }
+
+        if (reserveCharts && options.ProtectBrineKing &&
+            !options.UseBrineKingSynergy && !options.GroundLootStrategyActive && !hasOrbs)
+        {
+            savedStarfish = RemoveUnused(working, usedPieceIds, IsStarfishChart,
+                StarfishScore, maxSave: MaxSavedStarfish);
+            var supportSlotsLeft = Math.Max(0, MaxSavedStarfish - savedStarfish);
+            if (supportSlotsLeft > 0)
+            {
+                savedAdjacentRare = RemoveUnused(working, usedPieceIds, IsAdjacentRareSaveChart,
+                    AdjacentRareScore, maxSave: supportSlotsLeft);
+            }
+        }
+
+        if (reserveCharts && options.ReserveGlobalRareForPremiumStrategies &&
+            !hasOrbs && !brineKingSynergyActive)
+            savedRareVoyage = RemoveUnused(working, usedPieceIds, IsRareVoyageChart,
+                RareVoyageScore, maxSave: Math.Clamp(options.SaveGlobalRare, 0, 120));
+
+        var savedBrineKing = reserveCharts && options.ProtectBrineKing
+            ? RemoveUnused(working, usedPieceIds, IsBrineKingsDomain, BrineKingScore,
+                maxSave: Math.Clamp(options.SaveBrineKing, 0, 120), force: true)
+            : 0;
+
+        var savedSeaPillars = reserveCharts && options.RareCurrencyStrongboxEngine
+            ? RemoveUnused(working, usedPieceIds, IsSeaPillars, SeaPillarsScore,
+                maxSave: Math.Clamp(options.SaveSeaPillars, 0, 20), force: true)
+            : 0;
+
+        var savedOperative = reserveCharts && options.CenterSpecialty && !spendStrongboxesNow
+            ? RemoveUnused(working, usedPieceIds, IsOperativeBoxChart)
+            : 0;
+        var savedLostMessage = reserveCharts && options.DedicatedLostMessageStrategy && !spendLostMessagesNow
+            ? RemoveUnused(working, usedPieceIds, IsLostMessageChart, LostMessageScore,
+                maxSave: Math.Clamp(options.SaveLostMessageCharts, 0, 120))
+            : 0;
+        var savedSulphur = reserveCharts && options.ReserveSulphurForSulphurBorder && !spendSulphurNow
+            ? RemoveUnused(working, usedPieceIds, IsSulphurChart, SulphurChartScore,
+                maxSave: Math.Clamp(options.SaveSulphurCharts, 0, 120))
+            : 0;
+
+        var savedUniqueAmulet = 0;
+        var savedClam = 0;
+        if (reserveCharts && options.UniqueAmuletClamCross && !amuletCrossLocked)
+        {
+            savedUniqueAmulet = RemoveUnused(working, usedPieceIds, IsUniqueAmulet2Chart,
+                UniqueAmuletScore, maxSave: MaxSavedUniqueAmulet2, force: true);
+            savedClam = RemoveUnused(working, usedPieceIds, IsClamChart, ClamScore,
+                maxSave: MaxSavedClamsForAmulet, force: true);
+        }
+
+        if (reserveCharts && surplusClams)
+        {
+            if (preferClamsAdjacentToAmulet)
+            {
+                var freeOrtho = FreeNeighbors(CenterRow, CenterCol, CellFree).Count();
+                var keep = Math.Max(0, freeOrtho);
+                var clamCandidates = working
+                    .Where(p => !usedPieceIds.Contains(p.Id) && IsClamChart(p))
+                    .OrderByDescending(ClamScore)
+                    .ThenByDescending(p => p.LocalModifier + p.GlobalModifier)
+                    .Select(p => p.Id)
+                    .ToList();
+                foreach (var id in clamCandidates.Skip(keep))
+                {
+                    if (!TrySavePiece(working, id, force: true))
+                        break;
+                    savedClam++;
+                }
+            }
+            else
+            {
+                savedClam += RemoveUnused(working, usedPieceIds, IsClamChart, ClamScore, force: true);
+            }
+        }
+
+        var centerTakenByCenterOnly = locks.Any(lp =>
+            lp.Row == CenterRow &&
+            lp.Col == CenterCol &&
+            pieces.FirstOrDefault(p => p.Id == lp.PieceId) is { } locked &&
+            IsCenterOnlyUniqueChart(locked));
+        var amulet2Waiting = working.Any(p =>
+            !usedPieceIds.Contains(p.Id) && IsUniqueAmulet2Chart(p));
+        var keepBeltRing = CellFree(CenterRow, CenterCol) && !centerTakenByCenterOnly && !amulet2Waiting
+            ? 1
+            : 0;
+        var savedUniqueBelt = 0;
+        var savedUniqueRing = 0;
+        if (reserveCharts)
+        {
+            foreach (var piece in working
+                         .Where(p => !usedPieceIds.Contains(p.Id) &&
+                                     (IsUniqueBeltChart(p) || IsUniqueRingChart(p)))
+                         .OrderByDescending(CenterOnlyUniqueScore)
+                         .ThenByDescending(p => p.LocalModifier + p.GlobalModifier)
+                         .Skip(keepBeltRing)
+                         .ToList())
+            {
+                if (!TrySavePiece(working, piece.Id, force: true))
+                    break;
+                if (IsUniqueBeltChart(piece))
+                    savedUniqueBelt++;
+                else
+                    savedUniqueRing++;
+            }
+        }
+
+        var activeStrategies = new List<string>();
+        if (options.RareMonstersDrop)
+        {
+            if (divineCenters.Count > 0)
+                activeStrategies.Add("Divine");
+            if (exaltedCenters.Count > 0)
+                activeStrategies.Add("Exalted");
+            if (annulCenters.Count > 0)
+                activeStrategies.Add("Annul");
+            if (ancientCenters.Count > 0)
+                activeStrategies.Add("Ancient");
+        }
+        if (pelagicLocked)
+            activeStrategies.Add("Pelagic");
+        if (amuletCrossLocked)
+            activeStrategies.Add("Amulet Hub");
+        else if (preferClamsAdjacentToAmulet)
+            activeStrategies.Add("Amulet Soft");
+        else if (amuletCenterLocked)
+            activeStrategies.Add("Amulet");
+        if (noConsumeActive)
+            activeStrategies.Add("No-consume");
+        if (brineKingSynergyActive)
+            activeStrategies.Add("Brine King + Rare Monsters");
+        if (seaPillarsStrongboxEngineActive)
+            activeStrategies.Add("Sea Pillars + Strongbox Rare Engine");
+        if (messageStrategyActive)
+            activeStrategies.Add("Messages in a Bottle: foco único");
+        if (sulphurStrategyActive)
+            activeStrategies.Add("Dead Man's Sulphur: foco único");
+        if (groundLootStrategyActive)
+            activeStrategies.Add("Ground loot conversion: combo completo");
 
         return new Result(
             working, locks,
             savedPelagic, savedFarm, savedStrongbox, savedStarfish, savedRareVoyage,
-            savedAdjacentRare, savedOperative, savedLostMessage, savedKishara,
-            savedClam, savedUniqueAmulet);
+            savedAdjacentRare, savedOperative, savedLostMessage, savedSulphur, savedKishara,
+            savedNoEquipment, savedFractured, savedGoldenLanterns, savedPantheon,
+            savedSoulEater, savedRareFracture, savedRarePossessed,
+            savedClam, savedUniqueAmulet,
+            savedUniqueBelt, savedUniqueRing, savedBrineKing, savedSeaPillars,
+            AmuletClamHubActive: amuletCrossLocked,
+            PreferClamsAdjacentToAmulet: preferClamsAdjacentToAmulet,
+            NoConsumeActive: noConsumeActive,
+            BrineKingSynergyActive: brineKingSynergyActive,
+            ActiveStrategies: activeStrategies);
+    }
+
+    private static bool BoardHasStrongTreasureAnchors(IReadOnlyList<BorderEffect>[,] tileBorders)
+    {
+        var treasureT1 = 0;
+        var treasureT2 = 0;
+        foreach (var (row, col) in EnumerateCells())
+        {
+            foreach (var b in BordersAt(tileBorders, row, col))
+            {
+                if (b.Name.Equals(TreasureAnchors1, StringComparison.OrdinalIgnoreCase))
+                    treasureT1++;
+                else if (b.Name.Equals(TreasureAnchors2, StringComparison.OrdinalIgnoreCase))
+                    treasureT2++;
+            }
+        }
+
+        return IsStrongTreasureAnchorsCounts(treasureT1, treasureT2);
+    }
+
+    public static int ClamHubCountForAmulet(MapPiece amulet2)
+    {
+        var connections = amulet2.BaseConnections.CountConnections();
+        if (connections <= 0)
+            return 0;
+        if (connections <= 2)
+            return 2;
+        return MaxSavedClamsForAmulet;
+    }
+
+    private static bool TryLockUniqueAmulet2Center(
+        List<MapPiece> working,
+        HashSet<int> usedPieceIds,
+        Action<int, int, MapPiece, int?> lockCell)
+    {
+        var amulet2 = TakeBest(working, usedPieceIds, IsUniqueAmulet2Chart, UniqueAmuletScore);
+        if (amulet2 == null)
+            return false;
+        lockCell(CenterRow, CenterCol, amulet2, null);
+        return true;
+    }
+
+    private static bool TryLockAmuletClamHub(
+        List<MapPiece> working,
+        HashSet<int> usedPieceIds,
+        Func<int, int, bool> cellFree,
+        Action<int, int, MapPiece, int?> lockCell)
+    {
+        var amulet2 = TakeBest(working, usedPieceIds, IsUniqueAmulet2Chart, UniqueAmuletScore);
+        if (amulet2 == null)
+            return false;
+
+        var clamCount = ClamHubCountForAmulet(amulet2);
+        if (clamCount <= 0)
+            return false;
+
+        var freeOrtho = FreeNeighbors(CenterRow, CenterCol, cellFree).ToList();
+        if (freeOrtho.Count < clamCount)
+            return false;
+
+        var clamSlots = freeOrtho
+            .OrderBy(c => c.Row == CenterRow - 1 && c.Col == CenterCol ? 1 : 0)
+            .Take(clamCount)
+            .ToList();
+
+        var clams = working
+            .Where(p => !usedPieceIds.Contains(p.Id) && IsClamChart(p))
+            .OrderByDescending(ClamScore)
+            .ThenByDescending(p => p.LocalModifier + p.GlobalModifier)
+            .Take(clamCount)
+            .ToList();
+        if (clams.Count < clamCount)
+            return false;
+
+        lockCell(CenterRow, CenterCol, amulet2, null);
+        for (var i = 0; i < clamCount; i++)
+            lockCell(clamSlots[i].Row, clamSlots[i].Col, clams[i], null);
+        return true;
     }
 
     public static bool IsClamChart(MapPiece piece) =>
@@ -247,13 +735,45 @@ public static class VoyagePlacementRules
     public static bool IsKishara(MapPiece piece) =>
         piece.Name.Contains(KisharaRoomName, StringComparison.OrdinalIgnoreCase);
 
+    public static bool IsBrineKingsDomain(MapPiece piece) =>
+        piece.Name.Contains(BrineKingRoomName, StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsSeaPillars(MapPiece piece) =>
+        piece?.Name?.Contains(SeaPillarsRoomName, StringComparison.OrdinalIgnoreCase) == true;
+
+    public static bool IsNoEquipmentChart(MapPiece piece) =>
+        piece.Modifiers.Any(m =>
+            m.Name.Equals(VoyageNoEquipmentDrops, StringComparison.OrdinalIgnoreCase));
+
+    public static bool IsSoulEaterChart(MapPiece piece) =>
+        piece.Modifiers.Any(m =>
+            m.Name.Equals(VoyageSoulEater, StringComparison.OrdinalIgnoreCase));
+
+    public static bool IsRareFractureChart(MapPiece piece) =>
+        piece.Modifiers.Any(m =>
+            m.Name.Equals(VoyageRareFracture, StringComparison.OrdinalIgnoreCase));
+
+    public static bool IsRarePossessedChart(MapPiece piece) =>
+        piece.Modifiers.Any(m =>
+            m.Name.Equals(VoyageMonstersPossessed, StringComparison.OrdinalIgnoreCase));
+
+    public static bool IsFracturedChart(MapPiece piece) =>
+        piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentFracturedPrefix));
+
+    public static bool IsGoldenLanternsChart(MapPiece piece) =>
+        piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentGoldenLanternsPrefix));
+
+    public static bool IsPantheonChart(MapPiece piece) =>
+        piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentPantheonPrefix));
+
     public static bool IsAdjacentStrongboxesChart(MapPiece piece) =>
         piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentStrongboxesPrefix));
 
     public static bool IsPremiumBoxChart(MapPiece piece) =>
         piece.Modifiers.Any(m =>
             IsFamily(m.Name, AdjacentDivinerBoxPrefix) ||
-            IsFamily(m.Name, AdjacentArcanistBoxPrefix));
+            IsFamily(m.Name, AdjacentArcanistBoxPrefix) ||
+            IsFamily(m.Name, AdjacentOperativeBoxPrefix));
 
     public static bool IsStrongboxCountChart(MapPiece piece) =>
         IsAdjacentStrongboxesChart(piece) || IsPremiumBoxChart(piece);
@@ -276,6 +796,11 @@ public static class VoyagePlacementRules
         piece.Modifiers.Any(m =>
             m.Name.Equals(VoyageIncreasedRareMonsters, StringComparison.OrdinalIgnoreCase));
 
+    public static bool IsSulphurChart(MapPiece piece) =>
+        piece.Modifiers.Any(m =>
+            IsFamily(m.Name, VoyageResourceFoundPrefix) ||
+            m.Tags.HasFlag(ModifierTag.Sulphur));
+
     public static bool IsLostMessageChart(MapPiece piece) =>
         piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentLostMessagePrefix));
 
@@ -292,6 +817,15 @@ public static class VoyagePlacementRules
             IsFamily(m.Name, AdjacentUniqueAmuletPrefix) &&
             TierFromFamily(m.Name, AdjacentUniqueAmuletPrefix) == 2);
 
+    public static bool IsUniqueBeltChart(MapPiece piece) =>
+        piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentUniqueBeltPrefix));
+
+    public static bool IsUniqueRingChart(MapPiece piece) =>
+        piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentUniqueRingPrefix));
+
+    public static bool IsCenterOnlyUniqueChart(MapPiece piece) =>
+        IsUniqueAmulet2Chart(piece) || IsUniqueBeltChart(piece) || IsUniqueRingChart(piece);
+
     public static bool IsOrbRareGlobalChart(MapPiece piece) =>
         IsRareVoyageChart(piece);
 
@@ -307,11 +841,39 @@ public static class VoyagePlacementRules
                || IsFamily(rawName, AdjacentArcanistBoxPrefix)
                || IsFamily(rawName, AdjacentOperativeBoxPrefix)
                || IsFamily(rawName, AdjacentStarfishPrefix)
-               || (IsFamily(rawName, AdjacentIncreasedRarePrefix) &&
-                   TierFromFamily(rawName, AdjacentIncreasedRarePrefix) >= 2)
                || IsFamily(rawName, AdjacentLostMessagePrefix)
-               || IsFamily(rawName, AdjacentUniqueAmuletPrefix)
-               || rawName.Equals(VoyageIncreasedRareMonsters, StringComparison.OrdinalIgnoreCase);
+               || (IsFamily(rawName, AdjacentUniqueAmuletPrefix) &&
+                   TierFromFamily(rawName, AdjacentUniqueAmuletPrefix) == 2)
+               || IsFamily(rawName, AdjacentUniqueBeltPrefix)
+               || IsFamily(rawName, AdjacentUniqueRingPrefix);
+    }
+
+    public static bool IsIncreasedRareStrategyModifier(string rawName)
+    {
+        if (string.IsNullOrEmpty(rawName))
+            return false;
+        if (rawName.Equals(VoyageIncreasedRareMonsters, StringComparison.OrdinalIgnoreCase))
+            return true;
+        return IsFamily(rawName, AdjacentIncreasedRarePrefix) &&
+               TierFromFamily(rawName, AdjacentIncreasedRarePrefix) >= 2;
+    }
+
+    public static bool HasStrategyOrb(IEnumerable<string> borderNames)
+    {
+        if (borderNames == null)
+            return false;
+        foreach (var name in borderNames)
+        {
+            if (string.IsNullOrEmpty(name))
+                continue;
+            if (name.Equals(RareDivine, StringComparison.OrdinalIgnoreCase) ||
+                name.Equals(RareExalted, StringComparison.OrdinalIgnoreCase) ||
+                name.Equals(RareAnnul, StringComparison.OrdinalIgnoreCase) ||
+                name.Equals(RareAncient, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     public static HashSet<int> SelectInventorySpecialtyIndices(
@@ -320,6 +882,8 @@ public static class VoyagePlacementRules
     {
         var marked = new HashSet<int>();
         var starfish = new List<(int Index, int Value1)>();
+        var adjRareT2 = new List<(int Index, double Score)>();
+        var voyageRare = new List<(int Index, double Score)>();
         var boxes = new List<(int Index, int Value1)>();
         var count = Math.Min(roomNames.Count, modsPerChart.Count);
 
@@ -337,12 +901,12 @@ public static class VoyagePlacementRules
             {
                 if (string.IsNullOrEmpty(raw))
                     continue;
-                if (raw.Equals(VoyageIncreasedRareMonsters, StringComparison.OrdinalIgnoreCase) ||
-                    IsFamily(raw, AdjacentLostMessagePrefix) ||
+                if (IsFamily(raw, AdjacentLostMessagePrefix) ||
                     IsFamily(raw, AdjacentOperativeBoxPrefix) ||
-                    IsFamily(raw, AdjacentUniqueAmuletPrefix) ||
-                    (IsFamily(raw, AdjacentIncreasedRarePrefix) &&
-                     TierFromFamily(raw, AdjacentIncreasedRarePrefix) >= 2))
+                    (IsFamily(raw, AdjacentUniqueAmuletPrefix) &&
+                     TierFromFamily(raw, AdjacentUniqueAmuletPrefix) == 2) ||
+                    IsFamily(raw, AdjacentUniqueBeltPrefix) ||
+                    IsFamily(raw, AdjacentUniqueRingPrefix))
                 {
                     always = true;
                     break;
@@ -356,14 +920,49 @@ public static class VoyagePlacementRules
             if (starfishV > 0)
                 starfish.Add((i, starfishV));
 
+            var adjRareTier = 0;
+            foreach (var (raw, _) in mods)
+            {
+                if (IsFamily(raw, AdjacentIncreasedRarePrefix))
+                    adjRareTier = Math.Max(adjRareTier, TierFromFamily(raw, AdjacentIncreasedRarePrefix));
+            }
+
+            if (adjRareTier >= 2)
+                adjRareT2.Add((i, adjRareTier * 1_000.0));
+
+            foreach (var (raw, _) in mods)
+            {
+                if (raw.Equals(VoyageIncreasedRareMonsters, StringComparison.OrdinalIgnoreCase))
+                {
+                    voyageRare.Add((i, 1));
+                    break;
+                }
+            }
+
             var boxV = BoxPoolValue1(mods);
             if (boxV > 0)
                 boxes.Add((i, boxV));
         }
 
+        var supportMarked = 0;
         foreach (var (index, _) in starfish
                      .OrderByDescending(x => x.Value1)
                      .Take(MaxSavedStarfish))
+        {
+            marked.Add(index);
+            supportMarked++;
+        }
+
+        var rareSlots = Math.Max(0, MaxSavedStarfish - supportMarked);
+        if (rareSlots > 0)
+        {
+            foreach (var (index, _) in adjRareT2
+                         .OrderByDescending(x => x.Score)
+                         .Take(rareSlots))
+                marked.Add(index);
+        }
+
+        foreach (var (index, _) in voyageRare.Take(MaxSavedRareVoyage))
             marked.Add(index);
 
         foreach (var (index, _) in boxes
@@ -382,6 +981,18 @@ public static class VoyagePlacementRules
         if (roomName.Contains(PelagicRoomName, StringComparison.OrdinalIgnoreCase))
         {
             label = "Pelagic";
+            return true;
+        }
+
+        if (roomName.Contains(BrineKingRoomName, StringComparison.OrdinalIgnoreCase))
+        {
+            label = "Brine King";
+            return true;
+        }
+
+        if (roomName.Contains(SeaPillarsRoomName, StringComparison.OrdinalIgnoreCase))
+        {
+            label = "Sea Pillars";
             return true;
         }
 
@@ -411,10 +1022,9 @@ public static class VoyagePlacementRules
         if (string.IsNullOrEmpty(rawName))
             return false;
         return rawName.Equals(RareDivine, StringComparison.OrdinalIgnoreCase)
+               || rawName.Equals(RareExalted, StringComparison.OrdinalIgnoreCase)
                || rawName.Equals(RareAnnul, StringComparison.OrdinalIgnoreCase)
-               || rawName.Equals(RareAncient, StringComparison.OrdinalIgnoreCase)
-               || rawName.Equals(MoreScarabs2, StringComparison.OrdinalIgnoreCase)
-               || rawName.Equals(MoreScarabs3, StringComparison.OrdinalIgnoreCase);
+               || rawName.Equals(RareAncient, StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool IsTreasureAnchorsBorder(string rawName)
@@ -428,6 +1038,11 @@ public static class VoyagePlacementRules
     private static double FarmPriority(MapPiece p) =>
         p.LocalModifier + p.GlobalModifier;
 
+    private static double SoulEaterScore(MapPiece p) =>
+        p.Modifiers.Where(m => m.Name.Equals(VoyageSoulEater, StringComparison.OrdinalIgnoreCase))
+            .Sum(m => m.Weight)
+        + p.LocalModifier + p.GlobalModifier;
+
     private static double ClamScore(MapPiece p) =>
         p.LocalModifier + p.GlobalModifier;
 
@@ -436,13 +1051,30 @@ public static class VoyagePlacementRules
             MaxFamilyValue1Score(p, AdjacentStrongboxesPrefix),
             Math.Max(
                 MaxFamilyValue1Score(p, AdjacentDivinerBoxPrefix),
-                MaxFamilyValue1Score(p, AdjacentArcanistBoxPrefix)));
+                Math.Max(
+                    MaxFamilyValue1Score(p, AdjacentArcanistBoxPrefix),
+                    MaxFamilyValue1Score(p, AdjacentOperativeBoxPrefix))));
 
     private static double OperativeBoxScore(MapPiece p) =>
         MaxFamilyValue1Score(p, AdjacentOperativeBoxPrefix);
 
     private static double StarfishScore(MapPiece p) =>
         MaxFamilyValue1Score(p, AdjacentStarfishPrefix);
+
+    private static double SeaPillarsScore(MapPiece p) =>
+        10_000 + p.Modifiers
+            .Where(m => m.Tags.HasFlag(ModifierTag.RareMonsters) ||
+                        m.Tags.HasFlag(ModifierTag.Monsters) ||
+                        m.Name.Contains("PackSize", StringComparison.OrdinalIgnoreCase) ||
+                        m.Name.Contains("Starfish", StringComparison.OrdinalIgnoreCase))
+            .Sum(m => m.Weight + Math.Abs(m.Value1) * 0.5)
+        + p.LocalModifier + p.GlobalModifier;
+
+    private static double BrineKingScore(MapPiece p) =>
+        p.Modifiers.Where(m => m.Tags.HasFlag(ModifierTag.RareMonsters) ||
+                               m.Tags.HasFlag(ModifierTag.Monsters))
+            .Sum(m => m.Weight + Math.Abs(m.Value1) * 0.25)
+        + p.LocalModifier + p.GlobalModifier;
 
     private static double AdjacentRareScore(MapPiece p) =>
         MaxFamilyTierScore(p, AdjacentIncreasedRarePrefix);
@@ -451,11 +1083,33 @@ public static class VoyagePlacementRules
         p.Modifiers.Where(m => m.Name.Equals(VoyageIncreasedRareMonsters, StringComparison.OrdinalIgnoreCase))
             .Sum(m => m.Weight);
 
+    private static double SulphurChartScore(MapPiece p) =>
+        p.Modifiers.Where(m => IsFamily(m.Name, VoyageResourceFoundPrefix) ||
+                               m.Tags.HasFlag(ModifierTag.Sulphur))
+            .Sum(m => m.Weight + Math.Abs(m.Value1));
+
     private static double LostMessageScore(MapPiece p) =>
         MaxFamilyTierScore(p, AdjacentLostMessagePrefix);
 
     private static double UniqueAmuletScore(MapPiece p) =>
         MaxFamilyTierScore(p, AdjacentUniqueAmuletPrefix);
+
+    private static double UniqueBeltScore(MapPiece p) =>
+        MaxFamilyTierScore(p, AdjacentUniqueBeltPrefix);
+
+    private static double UniqueRingScore(MapPiece p) =>
+        MaxFamilyTierScore(p, AdjacentUniqueRingPrefix);
+
+    private static double CenterOnlyUniqueScore(MapPiece p)
+    {
+        if (IsUniqueAmulet2Chart(p))
+            return 3_000 + UniqueAmuletScore(p);
+        if (IsUniqueBeltChart(p))
+            return 2_000 + UniqueBeltScore(p);
+        if (IsUniqueRingChart(p))
+            return 1_000 + UniqueRingScore(p);
+        return 0;
+    }
 
     private static double OrbRareComboScore(MapPiece p)
     {
@@ -512,7 +1166,9 @@ public static class VoyagePlacementRules
             MaxFamilyValue1(mods, AdjacentStrongboxesPrefix),
             Math.Max(
                 MaxFamilyValue1(mods, AdjacentDivinerBoxPrefix),
-                MaxFamilyValue1(mods, AdjacentArcanistBoxPrefix)));
+                Math.Max(
+                    MaxFamilyValue1(mods, AdjacentArcanistBoxPrefix),
+                    MaxFamilyValue1(mods, AdjacentOperativeBoxPrefix))));
 
     private static bool IsFamily(string rawName, string prefix) =>
         !string.IsNullOrEmpty(rawName) &&
@@ -540,6 +1196,9 @@ public static class VoyagePlacementRules
         return t2 >= 1 || t1 >= 2;
     }
 
+    public static bool IsStrongTreasureAnchorsCounts(int t1, int t2) =>
+        (t2 >= 1 && t1 >= 2) || t1 >= 3 || t2 >= 2;
+
     public static bool IsStrongTreasureAnchors(IEnumerable<string> borderNames)
     {
         var t1 = 0;
@@ -557,7 +1216,7 @@ public static class VoyagePlacementRules
                 t2++;
         }
 
-        return t2 >= 2 || (t2 >= 1 && t1 >= 1) || t1 >= 3;
+        return IsStrongTreasureAnchorsCounts(t1, t2);
     }
 
     public static bool IsStrongTreasureAnchors(IReadOnlyList<BorderEffect> borders) =>
@@ -569,6 +1228,8 @@ public static class VoyagePlacementRules
         foreach (var b in borders)
         {
             if (b.Name.Equals(RareDivine, StringComparison.OrdinalIgnoreCase))
+                best = Math.Max(best, 4);
+            else if (b.Name.Equals(RareExalted, StringComparison.OrdinalIgnoreCase))
                 best = Math.Max(best, 3);
             else if (b.Name.Equals(RareAnnul, StringComparison.OrdinalIgnoreCase))
                 best = Math.Max(best, 2);
@@ -578,6 +1239,31 @@ public static class VoyagePlacementRules
 
         return best;
     }
+
+    public static bool HasRareMonsterBoostBorder(IReadOnlyList<BorderEffect> borders) =>
+        borders?.Any(b => b.Name?.Contains("RareMonster", StringComparison.OrdinalIgnoreCase) == true ||
+                          b.Name?.Contains("PackSize", StringComparison.OrdinalIgnoreCase) == true ||
+                          b.Tags.HasFlag(ModifierTag.RareMonsters)) == true;
+
+    private static bool HasChartEffectBorder(IReadOnlyList<BorderEffect> borders) =>
+        borders?.Any(b => b.AffectsPlacedChart ||
+                          b.Name?.Contains("ChartEffect", StringComparison.OrdinalIgnoreCase) == true) == true;
+
+    public static bool HasValuableRareCurrencyBorder(IReadOnlyList<BorderEffect>[,] tileBorders) =>
+        EnumerateCells().Any(c => BordersAt(tileBorders, c.Row, c.Col).Any(b =>
+            b.Name.Equals(RareDivine, StringComparison.OrdinalIgnoreCase) ||
+            b.Name.Equals(RareExalted, StringComparison.OrdinalIgnoreCase) ||
+            b.Name.Equals(RareAnnul, StringComparison.OrdinalIgnoreCase) ||
+            b.Name.Equals(RareAncient, StringComparison.OrdinalIgnoreCase)));
+
+    public static bool HasStrongboxSpendBorder(IReadOnlyList<BorderEffect>[,] tileBorders) =>
+        EnumerateCells().Any(c => BordersAt(tileBorders, c.Row, c.Col).Any(b =>
+            b.Name.Contains("MoreScarabs", StringComparison.OrdinalIgnoreCase) ||
+            b.Name.Contains("MoreCurrency", StringComparison.OrdinalIgnoreCase) ||
+            b.Name.Contains("RareMonster", StringComparison.OrdinalIgnoreCase)));
+
+    private static int InGridDegree(int row, int col) =>
+        4 - (row == 0 || row == 2 ? 1 : 0) - (col == 0 || col == 2 ? 1 : 0);
 
     private static MapPiece TakeBest(
         List<MapPiece> working,
@@ -592,8 +1278,10 @@ public static class VoyagePlacementRules
             .FirstOrDefault();
     }
 
-    private static bool TrySavePiece(List<MapPiece> working, int pieceId)
+    private static bool TrySavePiece(List<MapPiece> working, int pieceId, bool force = false)
     {
+        // "force" means that this strategy outranks the normal hold-out priority; it must never
+        // make the voyage unsolvable by leaving fewer than the nine required charts.
         if (working.Count <= 9)
             return false;
         return working.RemoveAll(p => p.Id == pieceId) > 0;
@@ -604,7 +1292,8 @@ public static class VoyagePlacementRules
         HashSet<int> used,
         Func<MapPiece, bool> pred,
         Func<MapPiece, double> score = null,
-        int? maxSave = null)
+        int? maxSave = null,
+        bool force = false)
     {
         IEnumerable<MapPiece> candidates = working.Where(p => !used.Contains(p.Id) && pred(p));
         if (score != null)
@@ -621,7 +1310,7 @@ public static class VoyagePlacementRules
         var removed = 0;
         foreach (var id in drop)
         {
-            if (!TrySavePiece(working, id))
+            if (!TrySavePiece(working, id, force))
                 break;
             removed++;
         }

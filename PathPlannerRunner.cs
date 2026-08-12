@@ -45,12 +45,20 @@ public class PathPlannerRunner
 
     private Task _task;
 
-    public void Start(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController)
+    public void Start(
+        PlannerSettings settings,
+        ExpeditionEnvironment environment,
+        SoundController soundController,
+        bool playSoundOnFinish = true)
     {
-        _task = Run(settings, environment, soundController);
+        _task = Run(settings, environment, soundController, playSoundOnFinish);
     }
 
-    private async Task Run(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController)
+    private async Task Run(
+        PlannerSettings settings,
+        ExpeditionEnvironment environment,
+        SoundController soundController,
+        bool playSoundOnFinish)
     {
         _environment = environment;
         _pathPlanner = new PathPlanner(settings);
@@ -68,12 +76,23 @@ public class PathPlannerRunner
                     var p = new PathPlanner(settings);
                     var sw = Stopwatch.StartNew();
                     var iterationSw = Stopwatch.StartNew();
+                    var stableSw = Stopwatch.StartNew();
+                    var localBest = double.NegativeInfinity;
                     p.Init(environment);
                     foreach (var bestPath in p.GetBestPathSeries(environment))
                     {
                         BestValues[ii] = new BestValue(bestPath.Points, bestPath.Score, (BestValues[ii]?.Iteration ?? 0) + 1, iterationSw.Elapsed.TotalMilliseconds);
                         iterationSw.Restart();
+                        if (bestPath.Score > localBest + 0.001)
+                        {
+                            localBest = bestPath.Score;
+                            stableSw.Restart();
+                        }
+
                         if (sw.Elapsed.TotalSeconds >= settings.MaximumGenerationTimeSeconds.Value ||
+                            (settings.StopWhenStable.Value &&
+                             sw.ElapsedMilliseconds >= 250 &&
+                             stableSw.ElapsedMilliseconds >= settings.StableSearchMilliseconds.Value) ||
                             _cts.IsCancellationRequested)
                         {
                             return;
@@ -94,7 +113,7 @@ public class PathPlannerRunner
         finally
         {
             DebugWindow.LogMsg("DeepwaterEngagementSuite PathPlanner finished.");
-            if (settings.PlaySoundOnFinish)
+            if (!_cts.IsCancellationRequested && playSoundOnFinish && settings.PlaySoundOnFinish)
             {
                 soundController.PlaySound("attention");
             }

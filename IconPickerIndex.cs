@@ -7,8 +7,10 @@ namespace DeepwaterEngagementSuite;
 public enum IconPickerIndex
 {
     OtherChests,
+    SunkenLoot,
     BottledItemChest,
     GoldTreasureChest,
+    GoldPile,
     ClamTreasureChest,
     CurrencyTreasureChest,
     CurrencyTreasureChestOpulent,
@@ -33,5 +35,11 @@ public enum IconPickerIndex
     StrongboxDivination,
     StrongboxScarab,
     StrongboxArcanist,
+    StrongboxOperative,
+    StrongboxGeneric,
     PointerTarget,
+    DeadMansSulphurSmall,
+    DeadMansSulphurBase,
+    DeadMansSulphurLarge,
+    DeadMansSulphurHuge,
 }

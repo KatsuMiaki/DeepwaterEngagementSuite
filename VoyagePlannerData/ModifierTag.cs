@@ -26,9 +26,10 @@ public enum ModifierTag
     Resources = 1 << 11,
     Lanterns = 1 << 12,
     Rarity = 1 << 13,
+    Sulphur = 1 << 14,
 
     All = Monsters | MagicMonsters | RareMonsters | Essences | Strongboxes | Uniques | Currency |
-          Scarabs | Gold | Equipment | Experience | Resources | Lanterns | Rarity,
+          Scarabs | Gold | Equipment | Experience | Resources | Lanterns | Rarity | Sulphur,
 }
 
 public static class ModifierTagParser

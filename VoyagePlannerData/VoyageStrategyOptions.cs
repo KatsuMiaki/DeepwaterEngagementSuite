@@ -1,0 +1,41 @@
+namespace DeepwaterEngagementSuite.VoyagePlannerData;
+
+public sealed record VoyageStrategyOptions(
+    bool UniqueAmuletClamCross = true,
+    bool RareMonstersDrop = true,
+    bool RareCurrencyStrongboxEngine = true,
+    int SaveSeaPillars = 3,
+    bool NoConsumeAnchorfield = true,
+    bool CenterSpecialty = true,
+    bool AutomaticFocus = true,
+    int MaxActiveFocuses = 1,
+    double MinimumFocusScore = 45,
+    double SecondaryFocusRatio = 0.68,
+    double FocusWeightBonus = 0.85,
+    double OffFocusMultiplier = 0.55,
+    bool ProtectBrineKing = true,
+    bool UseBrineKingSynergy = true,
+    int SaveBrineKing = 6,
+    bool ReserveStrongboxesForValuableCurrency = true,
+    int SaveStrongboxes = 10,
+    bool ReserveGlobalRareForPremiumStrategies = true,
+    int SaveGlobalRare = 8,
+    bool DedicatedLostMessageStrategy = true,
+    int MinimumLostMessageCharts = 3,
+    int SaveLostMessageCharts = 8,
+    bool ReserveSulphurForSulphurBorder = true,
+    int SaveSulphurCharts = 8,
+    bool DedicatedMessageActive = false,
+    bool SulphurStrategyActive = false,
+    bool GroundLootStrategyActive = false,
+    bool SaveKishara = true,
+    bool SaveNoEquipment = true,
+    bool SaveFractured = true,
+    bool SaveGoldenLanterns = true,
+    bool SavePantheon = true,
+    bool SaveSoulEater = false,
+    bool SaveRareFracture = true,
+    bool SaveRarePossessed = true)
+{
+    public static VoyageStrategyOptions AllEnabled { get; } = new();
+}

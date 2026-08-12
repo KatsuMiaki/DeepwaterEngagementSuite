@@ -44,6 +44,16 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
 
     private readonly Dictionary<uint, EntityCacheItem> _cachedEntities = new Dictionary<uint, EntityCacheItem>();
     private readonly ConcurrentDictionary<string, ExpeditionEntityType> _entityTypeCache = new();
+    private readonly ConcurrentDictionary<(int X, int Y, int Radius), float> _walkableCoverageCache = new();
+    private bool _livePlannerArmed;
+    private bool _livePlannerSuppressedForArea;
+    private long _lootDiscoveryRevision;
+    private long _lastPlannedLootDiscoveryRevision;
+    private long _pendingLootDiscoveryRevision;
+    private long _pendingLootDiscoverySince;
+    private long _lastAutomaticReplanAt;
+    private bool _voyagePlannerStoppedForArea;
+    private long _lastVoyageEntityRefreshAt;
     private bool _largeMapOpen;
     private Vector2 _playerGridPos;
     private float _bubbleRadius;
@@ -67,6 +77,10 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
     private Vector2i? PlacementIndicatorPos => Handler.PlacementIndicator?.GridPosNum.TruncateToVector2I();
 
     private DeepwaterHandler Handler => GameController.IngameState.ServerData.DeepwaterHandler;
+    private bool IsVoyageArea =>
+        _voyageAreaLatched ||
+        (Handler != null &&
+         Handler.MaxLanternCount >= Settings.PlannerSettings.VoyageLanternThreshold.Value);
     private bool _initialized;
 
     public DeepwaterEngagementSuite()
@@ -77,6 +91,7 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
     public override bool Initialise()
     {
         InitOnce();
+        EnsureBubblePlannerDefaults();
         Order = 10_000;
         _profilesDirectory = Path.Combine(ConfigDirectory, "profiles");
         Directory.CreateDirectory(_profilesDirectory);
@@ -108,6 +123,13 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         SaveProfiles();
     }
 
+    public override void OnUnload()
+    {
+        _plannerRunner?.Stop();
+        RestoreSleepingEntityCollection();
+        base.OnUnload();
+    }
+
     private static void RegisterHotkey(HotkeyNodeV2 hotkey)
     {
         Input.RegisterKey(hotkey.Value);
@@ -116,6 +138,8 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
 
     private void StopSearch()
     {
+        _livePlannerArmed = false;
+        _livePlannerSuppressedForArea = true;
         if (_plannerRunner is { } run)
         {
             run.Stop();
@@ -129,16 +153,56 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
 
     private void StartSearch()
     {
+        if (IsVoyageArea)
+        {
+            StopPlannerForVoyage();
+            return;
+        }
+
+        _livePlannerArmed = true;
+        _livePlannerSuppressedForArea = false;
+        StartSearchCore(false);
+    }
+
+    private void StartSearchCore(bool automatic)
+    {
+        if (IsVoyageArea)
+        {
+            StopPlannerForVoyage();
+            return;
+        }
+
         _scoreHistory = [];
+        _editedPath = null;
+        _editedIndex = null;
+        _editedPathEval = null;
         _plannerRunner?.Stop();
+        var environment = PlannerEnvironment;
+        if (environment.MaxBubbles <= 0 || environment.Bubbles.Count == 0)
+        {
+            Settings.PlannerSettings.SearchState = SearchState.Empty;
+            return;
+        }
+
         var plannerRunner = new PathPlannerRunner();
-        plannerRunner.Start(Settings.PlannerSettings, PlannerEnvironment, GameController.SoundController);
+        plannerRunner.Start(
+            Settings.PlannerSettings,
+            environment,
+            GameController.SoundController,
+            playSoundOnFinish: !automatic);
         _plannerRunner = plannerRunner;
         Settings.PlannerSettings.SearchState = SearchState.Searching;
+        _lastPlannedLootDiscoveryRevision = _lootDiscoveryRevision;
+        _pendingLootDiscoveryRevision = _lootDiscoveryRevision;
+        _pendingLootDiscoverySince = 0;
+        if (automatic)
+            _lastAutomaticReplanAt = Environment.TickCount64;
     }
 
     private void ClearSearch()
     {
+        _livePlannerArmed = false;
+        _livePlannerSuppressedForArea = true;
         if (_plannerRunner is { } run)
         {
             run.Stop();
@@ -164,15 +228,109 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         _pathfindingData = GameController.IngameState.Data.RawPathfindingData;
         _areaDimensions = GameController.IngameState.Data.AreaDimensions;
         _shapeCache.Clear();
+        _walkableCoverageCache.Clear();
+        _livePlannerArmed = false;
+        _livePlannerSuppressedForArea = false;
+        _lootDiscoveryRevision = 0;
+        _lastPlannedLootDiscoveryRevision = 0;
+        _pendingLootDiscoveryRevision = 0;
+        _pendingLootDiscoverySince = 0;
+        _lastAutomaticReplanAt = 0;
+        _voyagePlannerStoppedForArea = false;
+        _lastVoyageEntityRefreshAt = 0;
+    }
+
+    private void EnsureBubblePlannerDefaults()
+    {
+        var planner = Settings.PlannerSettings;
+        if (planner.PlannerSchemaVersion >= 1)
+            return;
+
+        planner.ChestSettingsMap[IconPickerIndex.BottledItemChest] = new ChestSettings { Weight = 40 };
+        planner.ChestSettingsMap[IconPickerIndex.DeadMansSulphurSmall] = new ChestSettings { Weight = 30 };
+        planner.ChestSettingsMap[IconPickerIndex.DeadMansSulphurBase] = new ChestSettings { Weight = 30 };
+        planner.ChestSettingsMap[IconPickerIndex.DeadMansSulphurLarge] = new ChestSettings { Weight = 30 };
+        planner.ChestSettingsMap[IconPickerIndex.DeadMansSulphurHuge] = new ChestSettings { Weight = 30 };
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.SunkenLoot, new ChestSettings { Weight = 8 });
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.GoldPile, new ChestSettings { Weight = 6 });
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.GoldTreasureChest, new ChestSettings { Weight = 6 });
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.StrongboxGeneric, new ChestSettings { Weight = 12 });
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.StrongboxOperative, new ChestSettings { Weight = 20 });
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.StrongboxArcanist, new ChestSettings { Weight = 20 });
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.StrongboxDivination, new ChestSettings { Weight = 20 });
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.StrongboxScarab, new ChestSettings { Weight = 20 });
+        planner.ChestSettingsMap.TryAdd(IconPickerIndex.PointerTarget, new ChestSettings { Weight = 8 });
+        planner.PlannerSchemaVersion = 1;
+    }
+
+    private void UpdateLivePlanner()
+    {
+        var settings = Settings.PlannerSettings;
+        if (Handler == null)
+            return;
+
+        if (IsVoyageArea)
+        {
+            StopPlannerForVoyage();
+            return;
+        }
+
+        _voyagePlannerStoppedForArea = false;
+        if (!settings.LiveReplanEnabled.Value)
+            return;
+
+        if (!_livePlannerArmed || _zoneCleared || Bubbles.Count == 0 ||
+            Handler.PlacedLanternCount >= Handler.MaxLanternCount)
+            return;
+
+        var now = Environment.TickCount64;
+        var discoveryRevision = _lootDiscoveryRevision;
+        if (discoveryRevision == _lastPlannedLootDiscoveryRevision)
+        {
+            _pendingLootDiscoveryRevision = discoveryRevision;
+            _pendingLootDiscoverySince = 0;
+            return;
+        }
+
+        if (discoveryRevision != _pendingLootDiscoveryRevision)
+        {
+            _pendingLootDiscoveryRevision = discoveryRevision;
+            _pendingLootDiscoverySince = now;
+            return;
+        }
+
+        if (_pendingLootDiscoverySince == 0 ||
+            now - _pendingLootDiscoverySince < settings.LiveReplanDebounceMilliseconds.Value ||
+            now - _lastAutomaticReplanAt < settings.LiveReplanMinimumIntervalMilliseconds.Value)
+            return;
+
+        StartSearchCore(true);
+    }
+
+    private void StopPlannerForVoyage()
+    {
+        if (_voyagePlannerStoppedForArea)
+            return;
+
+        _plannerRunner?.Stop();
+        _plannerRunner = null;
+        _scoreHistory = [];
+        _editedPath = null;
+        _editedIndex = null;
+        _editedPathEval = null;
+        _livePlannerArmed = false;
+        Settings.PlannerSettings.SearchState = SearchState.Empty;
+        _voyagePlannerStoppedForArea = true;
     }
 
     private ExpeditionEntityType GetEntityType(string path)
     {
+        if (string.IsNullOrEmpty(path))
+            return ExpeditionEntityType.None;
+
         return _entityTypeCache.GetOrAdd(path, p => p switch
         {
-            "Metadata/Chests/StrongBoxes/StrongboxDivination" => ExpeditionEntityType.Marker,
-            "Metadata/Chests/StrongBoxes/StrongboxScarab" => ExpeditionEntityType.Marker,
-            "Metadata/Chests/StrongBoxes/Arcanist" => ExpeditionEntityType.Marker,
+            var a when a.StartsWith("Metadata/Chests/StrongBoxes/", StringComparison.Ordinal) => ExpeditionEntityType.Marker,
             var a when a.StartsWith("Metadata/Chests/LeagueDeepwater/", StringComparison.Ordinal) => ExpeditionEntityType.Marker,
             var a when a.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/DeepwaterIzaroObject", StringComparison.Ordinal) => ExpeditionEntityType.Marker,
             var a when a.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/DeepwaterAltarCrab", StringComparison.Ordinal) => ExpeditionEntityType.Marker,
@@ -182,6 +340,10 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             var a when a.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/DeepwaterLanternReplenishEncounter", StringComparison.Ordinal) => ExpeditionEntityType.Marker,
             var a when a.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/DeepwaterGoldenLantern", StringComparison.Ordinal) => ExpeditionEntityType.Marker,
             var a when a.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/DeepwaterBrineCoralEncounter", StringComparison.Ordinal) => ExpeditionEntityType.Marker,
+            var a when a.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/ResourceChest", StringComparison.Ordinal) => ExpeditionEntityType.Marker,
+            var a when a.Contains("Deepwater", StringComparison.OrdinalIgnoreCase) &&
+                           (a.Contains("GoldPile", StringComparison.OrdinalIgnoreCase) ||
+                            a.Contains("Sunken", StringComparison.OrdinalIgnoreCase)) => ExpeditionEntityType.Marker,
             _ => ExpeditionEntityType.None,
         });
     }
@@ -191,6 +353,8 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         "Metadata/Chests/StrongBoxes/StrongboxDivination" => IconPickerIndex.StrongboxDivination,
         "Metadata/Chests/StrongBoxes/StrongboxScarab" => IconPickerIndex.StrongboxScarab,
         "Metadata/Chests/StrongBoxes/Arcanist" => IconPickerIndex.StrongboxArcanist,
+        var p when p.Contains("Operative", StringComparison.OrdinalIgnoreCase) &&
+                       p.StartsWith("Metadata/Chests/StrongBoxes/", StringComparison.Ordinal) => IconPickerIndex.StrongboxOperative,
         var p when p.Contains("BottledItemChest", StringComparison.Ordinal) => IconPickerIndex.BottledItemChest,
         var p when p.Contains("ClamTreasureChest", StringComparison.Ordinal) => IconPickerIndex.ClamTreasureChest,
         var p when p.Contains("CurrencyTreasureChestOpulent", StringComparison.Ordinal) => IconPickerIndex.CurrencyTreasureChestOpulent,
@@ -204,6 +368,7 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         var p when p.Contains("DeepwaterChestMaps", StringComparison.Ordinal) => IconPickerIndex.MapsChest,
         var p when p.Contains("DeepwaterChestAllflameEmbers", StringComparison.Ordinal) => IconPickerIndex.AllflameEmbersChest,
         var p when p.Contains("GoldTreasureChest", StringComparison.Ordinal) => IconPickerIndex.GoldTreasureChest,
+        var p when p.Contains("GoldPile", StringComparison.OrdinalIgnoreCase) => IconPickerIndex.GoldPile,
         var p when p.Contains("DeepwaterCursedDucatDrop", StringComparison.Ordinal) => IconPickerIndex.CursedDucatDrop,
         var p when p.Contains("RandomDucatChest", StringComparison.Ordinal) => IconPickerIndex.RandomDucatChest,
         var p when p.Contains("DeepwaterChestHazardBoat", StringComparison.Ordinal) => IconPickerIndex.HazardBoatChest,
@@ -214,6 +379,14 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         var p when p.Contains("DeepwaterLanternReplenishEncounter", StringComparison.Ordinal) => IconPickerIndex.LanternReplenishEncounter,
         var p when p.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/DeepwaterGoldenLantern", StringComparison.Ordinal) => IconPickerIndex.GoldenLanternEncounter,
         var p when p.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/DeepwaterBrineCoralEncounter", StringComparison.Ordinal) => IconPickerIndex.InfusedCoralEncounter,
+        var p when p.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/ResourceChestSmall", StringComparison.Ordinal) => IconPickerIndex.DeadMansSulphurSmall,
+        var p when p.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/ResourceChestBase", StringComparison.Ordinal) => IconPickerIndex.DeadMansSulphurBase,
+        var p when p.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/ResourceChestLarge", StringComparison.Ordinal) => IconPickerIndex.DeadMansSulphurLarge,
+        var p when p.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/ResourceChestHuge", StringComparison.Ordinal) => IconPickerIndex.DeadMansSulphurHuge,
+        var p when p.StartsWith("Metadata/Terrain/Leagues/Deepwater/Objects/ResourceChest", StringComparison.Ordinal) => IconPickerIndex.DeadMansSulphurBase,
+        var p when p.Contains("Sunken", StringComparison.OrdinalIgnoreCase) => IconPickerIndex.SunkenLoot,
+        var p when p.StartsWith("Metadata/Chests/LeagueDeepwater/", StringComparison.Ordinal) => IconPickerIndex.SunkenLoot,
+        var p when p.StartsWith("Metadata/Chests/StrongBoxes/", StringComparison.Ordinal) => IconPickerIndex.StrongboxGeneric,
         _ => IconPickerIndex.OtherChests,
     };
 
@@ -273,6 +446,8 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             return null;
         }
 
+        UpdateVoyageEntitySafetyState();
+
         Settings.PlannerSettings.SearchState = _plannerRunner switch
         {
             { IsRunning: true } => SearchState.Searching,
@@ -293,26 +468,54 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         var largeMap = map.LargeMap.AsObject<SubMap>();
         _largeMapOpen = largeMap.IsVisible;
 
-        _bubbleRadius = Settings.BubbleSettings.BubbleRadiusOverride.Value is > 0 and var o ? o : Bubbles.Min(x => x.Radius);
+        var currentBubbles = Bubbles;
+        _bubbleRadius = Settings.BubbleSettings.BubbleRadiusOverride.Value is > 0 and var o
+            ? o
+            : currentBubbles.Count > 0
+                ? currentBubbles.Min(x => x.Radius)
+                : 0;
 
-        foreach (var entity in new[] { EntityType.Chest, EntityType.Terrain, EntityType.IngameIcon, }
-                     .SelectMany(x => GameController.EntityListWrapper.ValidEntitiesByType[x]))
+        var now = Environment.TickCount64;
+        var refreshEntityCache = !IsVoyageArea || now - _lastVoyageEntityRefreshAt >= 500;
+        if (refreshEntityCache)
         {
-            if (GetEntityType(entity.Path) == ExpeditionEntityType.None)
-                continue;
+            if (IsVoyageArea)
+                _lastVoyageEntityRefreshAt = now;
 
-            if (IsEntityCompleted(entity, GetChestType(entity.Path)))
+            foreach (var entity in GetPlannerSourceEntities(
+                         EntityType.Chest, EntityType.Terrain, EntityType.IngameIcon))
             {
-                _cachedEntities.Remove(entity.Id);
-                continue;
-            }
+                try
+                {
+                    if (GetEntityType(entity.Path) == ExpeditionEntityType.None)
+                        continue;
 
-            var newValue = BuildCacheItem(entity);
-            _cachedEntities[entity.Id] = _cachedEntities.TryGetValue(entity.Id, out var oldValue)
-                ? oldValue.Merge(newValue)
-                : newValue;
+                    if (IsEntityCompleted(entity, GetChestType(entity.Path)))
+                    {
+                        _cachedEntities.Remove(entity.Id);
+                        continue;
+                    }
+
+                    var newValue = BuildCacheItem(entity);
+                    if (_cachedEntities.TryGetValue(entity.Id, out var oldValue))
+                    {
+                        _cachedEntities[entity.Id] = oldValue.Merge(newValue);
+                    }
+                    else
+                    {
+                        _cachedEntities[entity.Id] = newValue;
+                        if (!IsEntityInBubble(newValue.GridPos))
+                            _lootDiscoveryRevision++;
+                    }
+                }
+                catch
+                {
+                    // Sleeping entities can disappear while their components are being read.
+                }
+            }
         }
 
+        UpdateLivePlanner();
         UpdateTrailTracking();
         return null;
     }
@@ -337,20 +540,75 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             }
         }
 
+        if (Settings.PlannerSettings.IncludeUndiscoveredPointerTargets)
+        {
+            foreach (var target in GetUnknownPointerTargets())
+            {
+                loot.Add((target, new PathPlannerData.Chest(IconPickerIndex.PointerTarget)));
+            }
+        }
+
+        var bubbles = Bubbles;
+        var bubbleRadius = bubbles.Count > 0 ? bubbles.Min(x => x.Radius) : _bubbleRadius;
+        var totalRemainingBubbles = Math.Max(0, Handler.MaxLanternCount - Handler.PlacedLanternCount);
+
         return new ExpeditionEnvironment(
             loot.FindAll(x => x.Item2 != null),
-            Bubbles.Min(x => x.Radius),
-            Handler.MaxLanternCount-Handler.PlacedLanternCount,
+            bubbleRadius,
+            totalRemainingBubbles,
             IsValidPlacement,
-            Bubbles);
+            position => GetWalkableCoverage(position, bubbleRadius),
+            bubbles,
+            false,
+            totalRemainingBubbles);
     }
 
     private bool IsValidPlacement(Vector2 x)
     {
-        return x.X >= 0 && x.Y >= 0 &&
+        return _pathfindingData != null &&
+               x.X >= 0 && x.Y >= 0 &&
                x.X < _areaDimensions.X &&
                x.Y < _areaDimensions.Y &&
                _pathfindingData[(int)x.Y][(int)x.X] > 3;
+    }
+
+    private float GetWalkableCoverage(Vector2 center, float radius)
+    {
+        if (_pathfindingData == null || radius <= 0)
+            return 1f;
+
+        const int quantization = 2;
+        var qx = (int)MathF.Round(center.X / quantization) * quantization;
+        var qy = (int)MathF.Round(center.Y / quantization) * quantization;
+        var qr = Math.Max(1, (int)MathF.Round(radius));
+
+        return _walkableCoverageCache.GetOrAdd((qx, qy, qr), key =>
+        {
+            var sampleStep = Math.Max(2f, key.Radius / 8f);
+            var radiusSquared = key.Radius * key.Radius;
+            var walkable = 0;
+            var total = 0;
+
+            for (var y = -(float)key.Radius; y <= key.Radius; y += sampleStep)
+            {
+                for (var x = -(float)key.Radius; x <= key.Radius; x += sampleStep)
+                {
+                    if (x * x + y * y > radiusSquared)
+                        continue;
+
+                    total++;
+                    var gx = (int)MathF.Round(key.X + x);
+                    var gy = (int)MathF.Round(key.Y + y);
+                    if (gx < 0 || gy < 0 || gx >= _areaDimensions.X || gy >= _areaDimensions.Y)
+                        continue;
+
+                    if (_pathfindingData[gy][gx] > 3)
+                        walkable++;
+                }
+            }
+
+            return total == 0 ? 0f : (float)walkable / total;
+        });
     }
 
     private int CountBaseType(BaseItemType bit)
@@ -385,6 +643,16 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         var remainingLanterns = Math.Max(0, maxLanterns - placedLanterns);
         ImGui.TextColored(new Vector4(0.4f, 0.8f, 1f, 1f),
             $"Lanterns: {placedLanterns}/{maxLanterns}  |  Remaining: {remainingLanterns}");
+        if (IsVoyageArea)
+        {
+            ImGui.TextColored(new Vector4(0.65f, 0.65f, 0.65f, 1f),
+                "Bubble Planner: desativado nesta Voyage");
+        }
+        else if (Settings.PlannerSettings.LiveReplanEnabled.Value)
+        {
+            ImGui.TextColored(new Vector4(0.55f, 0.85f, 0.55f, 1f),
+                $"Live adjustment: {(_livePlannerArmed ? "ON" : "waiting for first manual solve")}");
+        }
         ImGui.Separator();
 
         var entries = _cachedEntities.Values
@@ -530,7 +798,7 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             return;
         }
 
-        if (!largePanelsOpen && Settings.LootWindowSettings.ShowLootWindow)
+        if (!IsVoyageArea && !largePanelsOpen && Settings.LootWindowSettings.ShowLootWindow)
         {
             DrawLootWindow();
         }
@@ -601,13 +869,15 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             return;
         }
 
-        if (Settings.PlannerSettings.StartSearchHotkey.PressedOnce())
+        if (!IsVoyageArea && Settings.PlannerSettings.StartSearchHotkey.PressedOnce())
         {
             StartSearch();
         }
 
         if (!largePanelsOpen)
         {
+            DrawCompactSulphurClusters();
+
             foreach (var e in _cachedEntities.Values)
             {
                 if (e.IsOpened)
@@ -619,6 +889,11 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
                     {
                         var chestType = GetChestType(e.Path);
                         var icons = Settings.IconSettings;
+                        if (icons.CompactSulphurClusters.Value && IsSulphurCrystalType(chestType))
+                        {
+                            continue;
+                        }
+
                         if (!icons.IsIconEnabled(chestType))
                         {
                             continue;
@@ -663,13 +938,13 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             }
         }
 
-        if (EditedOrNativeScore is { PerPointScore.Count: > 0 } score)
+        if (!IsVoyageArea && EditedOrNativeScore is { PerPointScore.Count: > 0 } score)
         {
             var path = score.PerPointScore;
             var placedBubblePositions = Bubbles.Select(x=>x.Position).ToHashSet();
             var usedPath = (Settings.PlannerSettings.RemoveGraphicsForPlacedBubbles
-                ? path
-                : path.Where(x => !placedBubblePositions.Contains(x.Point))).DistinctBy(x => x.Point).ToDictionary(x => x.Point);
+                ? path.Where(x => !placedBubblePositions.Contains(x.Point))
+                : path).DistinctBy(x => x.Point).ToDictionary(x => x.Point);
             var usedPathLines = usedPath.OrderBy(x => x.Key.DistanceSqr(_playerGridPos.TruncateToVector2I())).Take(Settings.PlannerSettings.ClosestNLanterns)
                 .Select(x => x.Key).ToHashSet();
             for (var i = 0; i < path.Count; i++)
@@ -1063,21 +1338,39 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             && GetEntityType(entity.Path) != ExpeditionEntityType.None
             && !IsEntityCompleted(entity, GetChestType(entity.Path)))
         {
-            _cachedEntities[entity.Id] = BuildCacheItem(entity);
+            var item = BuildCacheItem(entity);
+            if (!_cachedEntities.ContainsKey(entity.Id) &&
+                (Handler == null || !IsEntityInBubble(item.GridPos)))
+                _lootDiscoveryRevision++;
+            _cachedEntities[entity.Id] = item;
             TrackTrailEntity(entity);
         }
     }
 
     public override void EntityRemoved(Entity entity)
     {
-        _cachedEntities.Remove(entity.Id);
+        var completed = false;
+        try
+        {
+            completed = IsEntityCompleted(entity, GetChestType(entity.Path));
+        }
+        catch
+        {
+            // When removal is caused by unload, components may already be unavailable.
+        }
+
+        if (completed || !Settings.PlannerSettings.RememberDiscoveredEntities)
+        {
+            _cachedEntities.Remove(entity.Id);
+        }
     }
 
     private static EntityCacheItem BuildCacheItem(Entity entity)
     {
+        var baseAnimatedMetadata = entity.GetComponent<Animated>()?.BaseAnimatedObjectEntity?.Metadata;
         return new EntityCacheItem(
             entity.Path,
-            new Lazy<string>(() => entity.GetComponent<Animated>()?.BaseAnimatedObjectEntity?.Metadata, LazyThreadSafetyMode.None),
+            new Lazy<string>(() => baseAnimatedMetadata, LazyThreadSafetyMode.PublicationOnly),
             entity.GetComponent<ObjectMagicProperties>()?.Mods,
             entity.PosNum,
             entity.PosNum.WorldToGrid(),
@@ -1095,8 +1388,10 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
 
     private static string GetEntityDisplayName(IconPickerIndex type) => type switch
     {
+        IconPickerIndex.SunkenLoot => "Sunken Loot",
         IconPickerIndex.BottledItemChest => "Bottled Item",
         IconPickerIndex.GoldTreasureChest => "Gold Treasure",
+        IconPickerIndex.GoldPile => "Gold Pile",
         IconPickerIndex.ClamTreasureChest => "Clam Treasure",
         IconPickerIndex.CurrencyTreasureChest => "Currency",
         IconPickerIndex.CurrencyTreasureChestOpulent => "Opulent Currency",
@@ -1120,7 +1415,13 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         IconPickerIndex.StrongboxDivination => "Card box",
         IconPickerIndex.StrongboxScarab => "Scarab box",
         IconPickerIndex.StrongboxArcanist => "Currency box",
+        IconPickerIndex.StrongboxOperative => "Operative Strongbox",
+        IconPickerIndex.StrongboxGeneric => "Strongbox",
         IconPickerIndex.PointerTarget => "Undiscovered Target",
+        IconPickerIndex.DeadMansSulphurSmall => "Sulphur Crystal (small)",
+        IconPickerIndex.DeadMansSulphurBase => "Sulphur Crystal",
+        IconPickerIndex.DeadMansSulphurLarge => "Sulphur Crystal (large)",
+        IconPickerIndex.DeadMansSulphurHuge => "Sulphur Crystal (huge)",
         _ => "Other",
     };
 
@@ -1136,6 +1437,10 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             IconPickerIndex.CursedDucatDrop or
             IconPickerIndex.LanternReplenishEncounter or
             IconPickerIndex.InfusedCoralEncounter or
+            IconPickerIndex.DeadMansSulphurSmall or
+            IconPickerIndex.DeadMansSulphurBase or
+            IconPickerIndex.DeadMansSulphurLarge or
+            IconPickerIndex.DeadMansSulphurHuge or
             IconPickerIndex.AltarOctopus or
             IconPickerIndex.AltarCrab;
 

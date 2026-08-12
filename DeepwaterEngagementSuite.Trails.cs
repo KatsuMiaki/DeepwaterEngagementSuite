@@ -40,6 +40,12 @@ public partial class DeepwaterEngagementSuite
         }
 
         var type = GetChestType(entity.Path);
+        if (Settings.IconSettings.ExcludeSulphurFromTrail.Value && IsSulphurCrystalType(type))
+        {
+            _trailMarkers.Remove(entity.Id);
+            return;
+        }
+
         var gridPos = entity.PosNum.WorldToGrid();
         if (IsEntityCompleted(entity, type))
         {

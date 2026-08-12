@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
+using DeepwaterEngagementSuite.VoyagePlannerData;
 
 namespace DeepwaterEngagementSuite;
 
@@ -95,7 +96,31 @@ public partial class DeepwaterEngagementSuite
         {
             vs.ChartModifiers.Content.Add(mod);
         }
+
+        UpgradeRareStrongboxTags(vs.ChartModifiers.Content);
     }
+
+    private static void UpgradeRareStrongboxTags(IEnumerable<VoyageChartModifier> modifiers)
+    {
+        foreach (var modifier in modifiers)
+        {
+            var id = modifier.Id.Value ?? "";
+            if (!IsRareStrongboxSource(id))
+                continue;
+
+            var tags = ModifierTagParser.Parse(modifier.Tags.Value, ModifierTag.None);
+            tags |= ModifierTag.Strongboxes | ModifierTag.RareMonsters;
+            modifier.Tags.Value = string.Join(",", Enum.GetValues<ModifierTag>()
+                .Where(tag => tag != ModifierTag.None && tag != ModifierTag.All &&
+                              (((int)tag & ((int)tag - 1)) == 0) && tags.HasFlag(tag)));
+        }
+    }
+
+    private static bool IsRareStrongboxSource(string id) =>
+        id.StartsWith(VoyagePlacementRules.AdjacentStrongboxesPrefix, StringComparison.OrdinalIgnoreCase) ||
+        id.StartsWith(VoyagePlacementRules.AdjacentDivinerBoxPrefix, StringComparison.OrdinalIgnoreCase) ||
+        id.StartsWith(VoyagePlacementRules.AdjacentArcanistBoxPrefix, StringComparison.OrdinalIgnoreCase) ||
+        id.StartsWith(VoyagePlacementRules.AdjacentOperativeBoxPrefix, StringComparison.OrdinalIgnoreCase);
 
     private void OnProfileSelected(string name)
     {
