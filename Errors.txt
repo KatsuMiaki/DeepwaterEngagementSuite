@@ -1,0 +1,3 @@
+Build failed:
+[10/08/2026 06:19:06, D:\ExileApi-Compiled-master\Plugins\Source\DeepwaterEngagementSuite\DeepwaterEngagementSuite.cs(302, 14)] CS0128: Uma variável de local ou função denominada 'Add' já está definida neste escopo
+[10/08/2026 06:19:06, D:\ExileApi-Compiled-master\Plugins\Source\DeepwaterEngagementSuite\DeepwaterEngagementSuite.cs(330, 17)] CS1503: Argumento 1: não é possível converter de "string" para "int"

@@ -688,7 +688,7 @@ public class VoyageSettings
 
     [Menu("Estratégias de posicionamento",
         "Cada opção explica quando reserva charts e quando os libera. Estratégias desativadas não travam células nem guardam charts.")]
-    public VoyageStrategySettings Strategies { get; set; } = new VoyageStrategySettings();
+    public VoyageStrategySettingsV2 Strategies { get; set; } = new VoyageStrategySettingsV2();
 }
 
 [Submenu(CollapsedByDefault = true)]
@@ -706,11 +706,11 @@ public class VoyageLayoutSettings
         "Formato aberto/candelabro. Útil quando uma estratégia premium precisa expor vários suportes.")]
     public ToggleNode AllowStraightLines { get; set; } = new ToggleNode(false);
 
-    [Menu("Ignorar restrições em Voyage premium",
-        "Quando a nota atingir o limite abaixo, libera todos os formatos e escolhe o que concentra melhor a recompensa.")]
+    [Menu("Permitir formato exigido pela estratégia premium",
+        "Troca temporariamente para somente o formato exigido pelo plano completo: linhas retas para moeda rara; compacto para Message/Brine. Nunca libera formatos arbitrários.")]
     public ToggleNode IgnoreRestrictionsForPremium { get; set; } = new ToggleNode(true);
 
-    [Menu("Nota mínima para exceção premium")]
+    [IgnoreMenu]
     public RangeNode<int> PremiumScoreThreshold { get; set; } = new RangeNode<int>(80, 50, 100);
 
     [Menu("Semelhança mínima com o formato (%)",
@@ -945,6 +945,73 @@ public class VoyageStrategySettings
         SaveSoulEater: SaveSoulEater.Value,
         SaveRareFracture: SaveRareFracture.Value,
         SaveRarePossessed: SaveRarePossessed.Value);
+}
+
+[Submenu(CollapsedByDefault = false)]
+public class VoyageStrategySettingsV2
+{
+    [Menu("Planejamento automático (recomendado)",
+        "Escolhe exatamente uma estratégia. Só gasta charts valiosos quando o pacote completo existe; caso contrário monta uma Fast Voyage.")]
+    public ToggleNode AutomaticFocus { get; set; } = new ToggleNode(true);
+
+    [Menu("Proteger estoques premium",
+        "Reserva Operative, Diviner, Strongboxes, rare monsters globais/adjacentes, Sea Pillars, Message e Sulphur 25%. O fallback não consome esses estoques.")]
+    public ToggleNode ProtectPremiumCharts { get; set; } = new ToggleNode(true);
+
+    [Menu("Moeda rara: mínimo de Strongboxes",
+        "Além de Sea Pillars e da borda de Divine/Annulment/Ancient/Exalted, exige esta quantidade de suportes adjacentes.")]
+    public RangeNode<int> MinimumRareCurrencyStrongboxes { get; set; } = new RangeNode<int>(3, 2, 4);
+
+    [Menu("Moeda rara: mínimo de rare monsters globais")]
+    public RangeNode<int> MinimumRareCurrencyGlobalRare { get; set; } = new RangeNode<int>(5, 3, 6);
+
+    [Menu("Tamanho do conjunto Operative/Diviner",
+        "Guarda cada família separadamente e usa o conjunto inteiro em uma Voyage dedicada.")]
+    public RangeNode<int> DedicatedStrongboxSetSize { get; set; } = new RangeNode<int>(9, 6, 9);
+
+    [Menu("Messages necessários para gastar",
+        "O padrão usa oito charts adjacentes e um chart-alvo.")]
+    public RangeNode<int> MinimumLostMessageCharts { get; set; } = new RangeNode<int>(8, 4, 8);
+
+    [Menu("Charts de Sulphur necessários",
+        "Só ativa com a borda de Sulphur e esta quantidade de charts que atingem o percentual mínimo.")]
+    public RangeNode<int> MinimumSulphurCharts { get; set; } = new RangeNode<int>(9, 6, 9);
+
+    [Menu("Sulphur mínimo por chart (%)")]
+    public RangeNode<int> MinimumSulphurPercent { get; set; } = new RangeNode<int>(25, 15, 25);
+
+    [Menu("Fast Voyage com charts de descarte",
+        "Quando nenhum pacote estiver completo, favorece Barrels, Imprisoned Monsters, Soul Eater e Tormented Spirits. O formato continua obedecendo S/$.")]
+    public ToggleNode PreferFastVoyageFillers { get; set; } = new ToggleNode(true);
+
+    public VoyageStrategyOptions ToOptions() => new(
+        AutomaticFocus: AutomaticFocus.Value,
+        ProtectPremiumCharts: ProtectPremiumCharts.Value,
+        MinimumRareCurrencyStrongboxes: MinimumRareCurrencyStrongboxes.Value,
+        MinimumRareCurrencyGlobalRare: MinimumRareCurrencyGlobalRare.Value,
+        DedicatedStrongboxSetSize: DedicatedStrongboxSetSize.Value,
+        MinimumLostMessageCharts: MinimumLostMessageCharts.Value,
+        SaveLostMessageCharts: 8,
+        MinimumSulphurCharts: MinimumSulphurCharts.Value,
+        MinimumSulphurPercent: MinimumSulphurPercent.Value,
+        SaveSulphurCharts: 9,
+        SaveStrongboxes: 9,
+        SaveGlobalRare: 9,
+        PreferFastVoyageFillers: PreferFastVoyageFillers.Value,
+        RareMonstersDrop: false,
+        RareCurrencyStrongboxEngine: false,
+        UseBrineKingSynergy: false,
+        UniqueAmuletClamCross: false,
+        NoConsumeAnchorfield: false,
+        CenterSpecialty: false,
+        SaveKishara: false,
+        SaveNoEquipment: false,
+        SaveFractured: false,
+        SaveGoldenLanterns: false,
+        SavePantheon: false,
+        SaveSoulEater: false,
+        SaveRareFracture: false,
+        SaveRarePossessed: false);
 }
 
 [Submenu(CollapsedByDefault = true)]

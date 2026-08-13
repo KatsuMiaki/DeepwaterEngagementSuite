@@ -48,6 +48,7 @@ public partial class DeepwaterEngagementSuite
     private string _lastObservedBorderFingerprint;
     private string _borderAnalysisFingerprint;
     private int _observedBorderRerolls;
+    private readonly HashSet<string> _unmappedBorderUiTexts = new(StringComparer.OrdinalIgnoreCase);
 
     private const int VoyageChartStableFramesRequired = 12;
 
@@ -585,9 +586,9 @@ public partial class DeepwaterEngagementSuite
 
         var tiles = tree.Tiles;
         var boardHasStrategyOrb = modsPerTileIndex.Values
-            .Any(tileMods => VoyagePlacementRules.HasStrategyOrb(tileMods.Select(m => m.RawName)));
+            .Any(tileMods => VoyagePlacementRules.HasStrategyOrb(tileMods.Select(m => m.Id)));
         var boardStrongTreasureAnchors = VoyagePlacementRules.IsStrongTreasureAnchors(
-            modsPerTileIndex.Values.SelectMany(tileMods => tileMods.Select(m => m.RawName)));
+            modsPerTileIndex.Values.SelectMany(tileMods => tileMods.Select(m => m.Id)));
 
         for (var index = 0; index < tiles.Count; index++)
         {
@@ -647,25 +648,24 @@ public partial class DeepwaterEngagementSuite
             }
 
             tileCenter = tileCenter + new Vector2(0, 10);
-            foreach (var itemMod in mods)
+            foreach (var borderMod in mods)
             {
-                var isStrategy = VoyagePlacementRules.IsStrategyBorder(itemMod.RawName);
+                var isStrategy = VoyagePlacementRules.IsStrategyBorder(borderMod.Id);
                 var isTreasure = boardStrongTreasureAnchors &&
-                                 VoyagePlacementRules.IsTreasureAnchorsBorder(itemMod.RawName);
+                                 VoyagePlacementRules.IsTreasureAnchorsBorder(borderMod.Id);
                 var isCombo = isStrategy || isTreasure;
                 var showTieredBorder = Settings.VoyageSettings.Economy.Enabled.Value &&
                                        Settings.VoyageSettings.Economy.AutomaticTierColors.Value;
                 if (!Settings.VoyageSettings.ShowAllBorderModifiers && !isCombo && !showTieredBorder)
                     continue;
 
-                var matchingSetting = Settings.VoyageSettings.BorderModifiers.Content
-                    .FirstOrDefault(c => c.Id.Value.Equals(itemMod.RawName, StringComparison.OrdinalIgnoreCase));
+                var matchingSetting = FindBorderSetting(borderMod.Id, borderMod.DisplayText);
                 var text = matchingSetting?.Abbreviation.Value is { Length: > 0 } abbv
                     ? abbv
-                    : itemMod.RawName.StartsWith("DeepwaterBorder", StringComparison.Ordinal)
-                        ? itemMod.RawName["DeepwaterBorder".Length..]
-                        : itemMod.RawName;
-                var lootEntry = _borderLootAnalysis?.Find(index / 3, index % 3, itemMod.RawName);
+                    : borderMod.Id.StartsWith("DeepwaterBorder", StringComparison.Ordinal)
+                        ? borderMod.Id["DeepwaterBorder".Length..]
+                        : borderMod.Label;
+                var lootEntry = _borderLootAnalysis?.Find(index / 3, index % 3, borderMod.Id);
                 if (Settings.VoyageSettings.Economy.ShowBorderScore.Value && lootEntry != null)
                     text += $" [{lootEntry.Score:0}]";
                 var color = Settings.VoyageSettings.Economy.AutomaticTierColors.Value && lootEntry != null
@@ -746,30 +746,184 @@ public partial class DeepwaterEngagementSuite
         }
     }
 
-    private static Dictionary<int, List<ItemMod>> GetTileMods(VoyageWindow tree)
+    private static readonly Dictionary<int, int[]> BorderSlotToTile = new()
     {
-        var borderMods = tree.Data.BorderMods;
-        Dictionary<int, List<ItemMod>> modsPerTileIndex = [];
-        if (borderMods.Count >= 12)
+        [0] = [0, 11],
+        [1] = [1],
+        [2] = [2, 3],
+        [3] = [10],
+        [4] = [],
+        [5] = [4],
+        [6] = [8, 9],
+        [7] = [7],
+        [8] = [5, 6],
+    };
+
+    private static IReadOnlyList<ItemMod> ReadBorderModsFromData(VoyageWindow tree) =>
+        tree?.Data?.BorderMods ?? [];
+
+    private static Element GetBorderModsUiRoot(VoyageWindow tree) =>
+        tree?.GetChildFromIndices(3, 10);
+
+    private static IReadOnlyList<string> ReadBorderModUiTexts(VoyageWindow tree)
+    {
+        var root = GetBorderModsUiRoot(tree);
+        if (root is not { IsValid: true })
+            return [];
+
+        var texts = new List<string>(12);
+        for (var i = 0; i < 12; i++)
         {
-            modsPerTileIndex = new Dictionary<int, List<int>>
-            {
-                [0] = [0, 11],
-                [1] = [1],
-                [2] = [2, 3],
-                [3] = [10],
-                [4] = [],
-                [5] = [4],
-                [6] = [8, 9],
-                [7] = [7],
-                [8] = [5, 6],
-            }.ToDictionary(
-                x => x.Key,
-                x => x.Value.Select(v => borderMods[v])
-                    .ToList());
+            var slot = root.GetChildAtIndex(i);
+            texts.Add(ReadBorderSlotText(slot));
         }
 
-        return modsPerTileIndex;
+        return texts;
+    }
+
+    private static string ReadBorderSlotText(Element slot)
+    {
+        if (slot is not { IsValid: true })
+            return "";
+
+        var newText = slot.GetChildFromIndices(1, 0)?.Text;
+        if (!string.IsNullOrWhiteSpace(newText))
+            return NormalizeBorderUiText(newText);
+
+        var oldTextElement = slot.GetChildAtIndex(1);
+        var oldText = oldTextElement?.TextNoTags ?? oldTextElement?.Text;
+        if (!string.IsNullOrWhiteSpace(oldText))
+            return NormalizeBorderUiText(oldText);
+
+        var tooltip = slot.Tooltip;
+        var tooltipText = tooltip?.TextNoTags ?? tooltip?.Text;
+        if (!string.IsNullOrWhiteSpace(tooltipText))
+            return NormalizeBorderUiText(tooltipText);
+
+        return NormalizeBorderUiText(slot.TextNoTags ?? slot.Text ?? "");
+    }
+
+    private static string NormalizeBorderUiText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return "";
+
+        var braceStart = text.IndexOf('{');
+        var braceEnd = text.LastIndexOf('}');
+        if (braceStart >= 0 && braceEnd > braceStart)
+            text = text.Substring(braceStart + 1, braceEnd - braceStart - 1);
+
+        var normalized = new System.Text.StringBuilder(text.Length);
+        var insideTag = false;
+        var pendingSpace = false;
+        foreach (var character in text)
+        {
+            if (character == '<')
+            {
+                insideTag = true;
+                pendingSpace = normalized.Length > 0;
+                continue;
+            }
+
+            if (character == '>' && insideTag)
+            {
+                insideTag = false;
+                continue;
+            }
+
+            if (insideTag)
+                continue;
+
+            if (char.IsWhiteSpace(character))
+            {
+                pendingSpace = normalized.Length > 0;
+                continue;
+            }
+
+            if (pendingSpace)
+            {
+                normalized.Append(' ');
+                pendingSpace = false;
+            }
+
+            normalized.Append(character);
+        }
+
+        return normalized.ToString().Trim();
+    }
+
+    private string ResolveBorderId(string rawName, string displayText)
+    {
+        if (!string.IsNullOrWhiteSpace(rawName) &&
+            rawName.StartsWith("DeepwaterBorder", StringComparison.OrdinalIgnoreCase))
+            return rawName;
+
+        var mapped = BorderDisplayMap.TryResolveId(displayText);
+        if (!string.IsNullOrWhiteSpace(mapped))
+            return mapped;
+
+        var setting = FindBorderSetting(rawName, displayText);
+        if (setting != null)
+            return setting.Id.Value;
+
+        if (!string.IsNullOrWhiteSpace(displayText) && _unmappedBorderUiTexts.Add(displayText))
+            DebugWindow.LogMsg(
+                $"Deepwater: unmapped border UI text: {displayText}",
+                10,
+                Color.Yellow);
+
+        return rawName ?? displayText ?? "";
+    }
+
+    private VoyageBorderModifier FindBorderSetting(string id, string displayText)
+    {
+        var settings = Settings.VoyageSettings.BorderModifiers.Content;
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            var exact = settings.FirstOrDefault(x =>
+                x.Id.Value.Equals(id, StringComparison.OrdinalIgnoreCase));
+            if (exact != null)
+                return exact;
+        }
+
+        var mapped = BorderDisplayMap.TryResolveId(displayText);
+        return string.IsNullOrWhiteSpace(mapped)
+            ? null
+            : settings.FirstOrDefault(x =>
+                x.Id.Value.Equals(mapped, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private Dictionary<int, List<BorderModRef>> GetTileMods(VoyageWindow tree)
+    {
+        var fromData = ReadBorderModsFromData(tree);
+        var fromUi = ReadBorderModUiTexts(tree);
+        var slots = new BorderModRef[12];
+
+        for (var i = 0; i < slots.Length; i++)
+        {
+            var dataMod = i < fromData.Count ? fromData[i] : null;
+            var rawName = dataMod?.RawName ?? "";
+            var displayText = i < fromUi.Count ? fromUi[i] : "";
+            var id = ResolveBorderId(rawName, displayText);
+            if (string.IsNullOrWhiteSpace(id))
+                continue;
+
+            var fromApi = rawName.StartsWith("DeepwaterBorder", StringComparison.OrdinalIgnoreCase);
+            slots[i] = new BorderModRef
+            {
+                Id = id,
+                DisplayText = displayText,
+                Source = fromApi ? "Data.BorderMods" : "UI 3->10->i->1->0.Text",
+                Values = dataMod?.Values?.ToArray() ?? [],
+            };
+        }
+
+        return BorderSlotToTile.ToDictionary(
+            x => x.Key,
+            x => x.Value
+                .Select(slot => slots[slot])
+                .Where(mod => mod != null)
+                .ToList());
     }
 
     private static int CountReadyCharts(VoyageWindow tree)
@@ -848,16 +1002,14 @@ public partial class DeepwaterEngagementSuite
         var economy = Settings.VoyageSettings.Economy;
         var layoutSettings = Settings.VoyageSettings.Layouts;
         var selectedLayouts = layoutSettings.SelectedFamilies();
+        var preliminaryFocus = VoyageFocusAnalyzer.Analyze(tileBorders, pieces, strategyOptions);
+        var requiredPremiumLayout = preliminaryFocus.RequiredLayoutFamilies;
         var premiumLayoutOverride = layoutSettings.IgnoreRestrictionsForPremium.Value &&
-                                    _borderLootAnalysis is { } borderAnalysis &&
-                                    (borderAnalysis.HasPremiumCombo ||
-                                     borderAnalysis.Score >= layoutSettings.PremiumScoreThreshold.Value);
-        var allowedLayouts = premiumLayoutOverride ? VoyageLayoutFamilies.All : selectedLayouts;
+                                    requiredPremiumLayout != VoyageLayoutFamilies.None;
+        var allowedLayouts = premiumLayoutOverride ? requiredPremiumLayout : selectedLayouts;
         var layoutPreference = allowedLayouts == VoyageLayoutFamilies.StraightLines
             ? VoyageLayoutPreference.StraightLines
-            : premiumLayoutOverride
-                ? _borderLootAnalysis?.LayoutPreference ?? VoyageLayoutPreference.SnakeOrCompact
-                : VoyageLayoutPreference.SnakeOrCompact;
+            : VoyageLayoutPreference.SnakeOrCompact;
         var layoutStrength = economy.Enabled.Value ? economy.LayoutPreferenceStrength.Value : 0;
         var generation = ++_voyageSolveGeneration;
 
@@ -929,13 +1081,20 @@ public partial class DeepwaterEngagementSuite
     private string BuildVoyageBoardFingerprint(VoyageWindow tree)
     {
         var parts = new List<string>();
-        var borders = tree?.Data?.BorderMods;
-        if (borders != null)
+        var dataMods = ReadBorderModsFromData(tree);
+        var dataUsable = dataMods.Count >= 12 && dataMods.Any(mod =>
+            mod?.RawName?.StartsWith("DeepwaterBorder", StringComparison.OrdinalIgnoreCase) == true);
+        if (dataUsable)
         {
-            foreach (var mod in borders)
+            foreach (var mod in dataMods)
                 parts.Add(mod == null
                     ? ""
                     : mod.RawName + ":" + string.Join(',', mod.Values));
+        }
+        else
+        {
+            foreach (var text in ReadBorderModUiTexts(tree))
+                parts.Add(text ?? "");
         }
 
         var charts = tree?.AvailableCharts;
@@ -974,34 +1133,29 @@ public partial class DeepwaterEngagementSuite
             parts.Add($"C:{mod.Id.Value}:{mod.Weight.Value}:{mod.Tags.Value}:{mod.IsGlobal.Value}");
 
         var strategies = Settings.VoyageSettings.Strategies;
-        parts.Add($"strategies:{strategies.UniqueAmuletClamCross.Value}:{strategies.RareMonstersDrop.Value}:" +
-                  $"{strategies.RareCurrencyStrongboxEngine.Value}:" +
-                  $"{strategies.SaveSeaPillars.Value}:" +
-                  $"{strategies.NoConsumeAnchorfield.Value}:{strategies.CenterSpecialty.Value}:" +
-                  $"{strategies.AutomaticFocus.Value}:{strategies.MaxActiveFocuses.Value}:" +
-                  $"{strategies.MinimumFocusScore.Value}:{strategies.SecondaryFocusRatioPercent.Value}:" +
-                  $"{strategies.FocusWeightBonusPercent.Value}:{strategies.OffFocusMultiplierPercent.Value}:" +
-                  $"{strategies.ProtectBrineKing.Value}:{strategies.SaveBrineKing.Value}:" +
-                  $"{strategies.ReserveStrongboxesForValuableCurrency.Value}:{strategies.SaveStrongboxes.Value}:" +
-                  $"{strategies.ReserveGlobalRareForPremiumStrategies.Value}:{strategies.SaveGlobalRare.Value}:" +
-                  $"{strategies.DedicatedLostMessageStrategy.Value}:{strategies.MinimumLostMessageCharts.Value}:" +
-                  $"{strategies.SaveLostMessageCharts.Value}:" +
-                  $"{strategies.ReserveSulphurForSulphurBorder.Value}:{strategies.SaveSulphurCharts.Value}:" +
-                  $"{strategies.SaveKishara.Value}:{strategies.SaveNoEquipment.Value}:" +
-                  $"{strategies.SaveFractured.Value}:{strategies.SaveGoldenLanterns.Value}:" +
-                  $"{strategies.SavePantheon.Value}:{strategies.SaveSoulEater.Value}:" +
-                  $"{strategies.SaveRareFracture.Value}:{strategies.SaveRarePossessed.Value}");
+        parts.Add($"strategies-v2:{strategies.AutomaticFocus.Value}:{strategies.ProtectPremiumCharts.Value}:" +
+                  $"{strategies.MinimumRareCurrencyStrongboxes.Value}:" +
+                  $"{strategies.MinimumRareCurrencyGlobalRare.Value}:" +
+                  $"{strategies.DedicatedStrongboxSetSize.Value}:" +
+                  $"{strategies.MinimumLostMessageCharts.Value}:" +
+                  $"{strategies.MinimumSulphurCharts.Value}:{strategies.MinimumSulphurPercent.Value}:" +
+                  $"{strategies.PreferFastVoyageFillers.Value}");
 
         return string.Join('\n', parts);
     }
 
     private static string BuildBorderFingerprint(VoyageWindow tree)
     {
-        var borders = tree?.Data?.BorderMods;
-        if (borders == null || borders.Count < 12)
-            return null;
-        return string.Join('|', borders.Select(mod =>
-            mod == null ? "" : mod.RawName + ":" + string.Join(',', mod.Values)));
+        var dataMods = ReadBorderModsFromData(tree);
+        if (dataMods.Count >= 12 && dataMods.Any(mod =>
+                mod?.RawName?.StartsWith("DeepwaterBorder", StringComparison.OrdinalIgnoreCase) == true))
+            return string.Join('|', dataMods.Select(mod =>
+                mod == null ? "" : mod.RawName + ":" + string.Join(',', mod.Values)));
+
+        var uiTexts = ReadBorderModUiTexts(tree);
+        return uiTexts.Any(text => !string.IsNullOrWhiteSpace(text))
+            ? string.Join('|', uiTexts)
+            : null;
     }
 
     private void UpdateBorderLootAnalysis(VoyageWindow tree, string boardFingerprint)
@@ -1507,9 +1661,8 @@ public partial class DeepwaterEngagementSuite
             var borderMods = modsPerTileIndex.GetValueOrDefault(tileIndex) ?? [];
             tileBorders[tileIndex / 3, tileIndex % 3] = borderMods.Select(m =>
             {
-                var setting = Settings.VoyageSettings.BorderModifiers.Content
-                    .FirstOrDefault(c => c.Id.Value.Equals(m.RawName, StringComparison.OrdinalIgnoreCase));
-                var isQuantityPerConnection = m.RawName.StartsWith(
+                var setting = FindBorderSetting(m.Id, m.DisplayText);
+                var isQuantityPerConnection = m.Id.StartsWith(
                     "DeepwaterBorderQuantityPerConnection", StringComparison.OrdinalIgnoreCase);
                 var baseAdditive = 0d;
                 var perConnectionAdditive = 0d;
@@ -1524,7 +1677,7 @@ public partial class DeepwaterEngagementSuite
                         baseAdditive = values.Max() / 100d;
                         perConnectionAdditive = -values.Min() / 100d;
                     }
-                    else if (m.RawName.EndsWith("2", StringComparison.OrdinalIgnoreCase))
+                    else if (m.Id.EndsWith("2", StringComparison.OrdinalIgnoreCase))
                     {
                         baseAdditive = 1.50;
                         perConnectionAdditive = -0.75;
@@ -1537,7 +1690,7 @@ public partial class DeepwaterEngagementSuite
                 }
 
                 return new BorderEffect(
-                    m.RawName,
+                    m.Id,
                     ModifierTagParser.Parse(setting?.Tags.Value, ModifierTag.All),
                     setting?.ValueMultiplier.Value ?? 1,
                     isQuantityPerConnection || (setting?.PerConnection.Value ?? false),
@@ -1629,7 +1782,7 @@ public partial class DeepwaterEngagementSuite
                 break;
             case VoyageSolveFallbackStage.ReservationsRelaxed:
                 ImGui.TextColored(color,
-                    $"Fallback: restored {solve.InitialReservedPieceCount} reserved charts; strategic locks kept.");
+                    "Fallback: relaxed only disposable reservations; premium stockpiles remain protected.");
                 break;
             case VoyageSolveFallbackStage.StrategyLocksRelaxed:
                 ImGui.TextColored(color,
@@ -1720,10 +1873,12 @@ public partial class DeepwaterEngagementSuite
             savedBits.Add($"{placement.SavedStrongboxCount} boxes");
         if (placement.SavedOperativeBoxCount > 0)
             savedBits.Add($"{placement.SavedOperativeBoxCount} Operative");
+        if (placement.SavedDivinerBoxCount > 0)
+            savedBits.Add($"{placement.SavedDivinerBoxCount} Diviner");
         if (placement.SavedStarfishCount > 0)
             savedBits.Add($"{placement.SavedStarfishCount} Starfish");
         if (placement.SavedAdjacentRareCount > 0)
-            savedBits.Add($"{placement.SavedAdjacentRareCount} adj. rare T2");
+            savedBits.Add($"{placement.SavedAdjacentRareCount} adjacent rare");
         if (placement.SavedRareVoyageCount > 0)
             savedBits.Add($"{placement.SavedRareVoyageCount} voyage rares");
         if (placement.SavedLostMessageCount > 0)

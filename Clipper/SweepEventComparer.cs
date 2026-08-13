@@ -15,6 +15,11 @@ internal sealed class SweepEventComparer : IComparer<SweepEvent>, IComparer
     /// <inheritdoc/>
     public int Compare(SweepEvent? x, SweepEvent? y)
     {
+        if (ReferenceEquals(x, y))
+        {
+            return 0;
+        }
+
         if (x == null)
         {
             return -1;
@@ -55,8 +60,17 @@ internal sealed class SweepEventComparer : IComparer<SweepEvent>, IComparer
             return x.IsBelow(y.OtherEvent.Point) ? -1 : 1;
         }
 
-        // Compare by polygon type: subject polygons have higher priority
-        return x.PolygonType != PolygonType.Subject && y.PolygonType == PolygonType.Subject ? 1 : -1;
+        // Compare by polygon type: subject polygons have higher priority.
+        if (x.PolygonType != y.PolygonType)
+        {
+            return x.PolygonType == PolygonType.Subject ? -1 : 1;
+        }
+
+        // Geometrically equivalent events are intentionally equal. The priority queue
+        // is stable and therefore preserves their insertion order. Returning -1 for
+        // both Compare(x, y) and Compare(y, x) violates the comparer contract and can
+        // corrupt heap ordering when circles contain coincident/tangent vertices.
+        return 0;
     }
 
     /// <inheritdoc/>

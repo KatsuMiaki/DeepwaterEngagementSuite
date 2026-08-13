@@ -38,9 +38,9 @@ public static class VoyagePlacementRules
     public const int CenterRow = 1;
     public const int CenterCol = 1;
 
-    public const int MaxSavedBoxes = 6;
-    public const int MaxSavedStarfish = 6;
-    public const int MaxSavedRareVoyage = 5;
+    public const int MaxSavedBoxes = 9;
+    public const int MaxSavedStarfish = 9;
+    public const int MaxSavedRareVoyage = 9;
     public const int MaxSavedPelagic = 2;
     public const int MaxSavedUniqueAmulet2 = 1;
     public const int MaxSavedClamsForAmulet = 3;
@@ -64,6 +64,7 @@ public static class VoyagePlacementRules
         int SavedRareVoyageCount,
         int SavedAdjacentRareCount,
         int SavedOperativeBoxCount,
+        int SavedDivinerBoxCount,
         int SavedLostMessageCount,
         int SavedSulphurCount,
         int SavedKisharaCount,
@@ -112,6 +113,7 @@ public static class VoyagePlacementRules
                 SavedRareVoyageCount: 0,
                 SavedAdjacentRareCount: 0,
                 SavedOperativeBoxCount: 0,
+                SavedDivinerBoxCount: 0,
                 SavedLostMessageCount: 0,
                 SavedSulphurCount: 0,
                 SavedKisharaCount: 0,
@@ -170,6 +172,40 @@ public static class VoyagePlacementRules
         var savedRareFracture = SaveByPredicate(options.SaveRareFracture, IsRareFractureChart);
         var savedRarePossessed = SaveByPredicate(options.SaveRarePossessed, IsRarePossessedChart);
 
+        // Premium stockpiles are hard reservations. They are not restored by the generic solver
+        // fallback: an incomplete premium set must never be burned merely to complete a filler run.
+        var setSize = Math.Clamp(options.DedicatedStrongboxSetSize, 1, 9);
+        var savedOperative = !options.ProtectPremiumCharts || options.OperativeFleetActive ? 0 : RemoveUnused(
+            working, usedPieceIds, p => IsOperativeBoxChart(p) && !IsDivinerBoxChart(p),
+            OperativeBoxScore, maxSave: setSize, force: true);
+        var savedDiviner = !options.ProtectPremiumCharts || options.DivinerFleetActive ? 0 : RemoveUnused(
+            working, usedPieceIds, p => IsDivinerBoxChart(p) && !IsOperativeBoxChart(p),
+            DivinerBoxScore, maxSave: setSize, force: true);
+        var savedLostMessage = !options.ProtectPremiumCharts || options.DedicatedMessageActive ? 0 : RemoveUnused(
+            working, usedPieceIds, IsLostMessageChart, LostMessageScore,
+            maxSave: Math.Clamp(options.SaveLostMessageCharts, 0, 8), force: true);
+        var savedSulphur = !options.ProtectPremiumCharts || options.SulphurStrategyActive ? 0 : RemoveUnused(
+            working, usedPieceIds, p => IsHighValueSulphurChart(p, options.MinimumSulphurPercent),
+            SulphurChartScore, maxSave: Math.Clamp(options.SaveSulphurCharts, 0, 9), force: true);
+        var rareCurrencyActive = options.RareCurrencyStrongboxEngine;
+        var rareDensityActive = rareCurrencyActive || options.UseBrineKingSynergy;
+        var savedStrongbox = !options.ProtectPremiumCharts || rareCurrencyActive ? 0 : RemoveUnused(
+            working, usedPieceIds,
+            p => IsStrongboxCountChart(p) && !IsOperativeBoxChart(p) && !IsDivinerBoxChart(p),
+            BoxValue1Score, maxSave: Math.Clamp(options.SaveStrongboxes, 0, 9), force: true);
+        var savedRareVoyage = !options.ProtectPremiumCharts || rareDensityActive ? 0 : RemoveUnused(
+            working, usedPieceIds, IsRareVoyageChart, RareVoyageScore,
+            maxSave: Math.Clamp(options.SaveGlobalRare, 0, 9), force: true);
+        var savedAdjacentRare = !options.ProtectPremiumCharts || rareDensityActive ? 0 : RemoveUnused(
+            working, usedPieceIds, IsAdjacentRareChart, AdjacentRareScore,
+            maxSave: 9, force: true);
+        var savedStarfish = !options.ProtectPremiumCharts || rareDensityActive ? 0 : RemoveUnused(
+            working, usedPieceIds, IsStarfishChart, StarfishScore,
+            maxSave: MaxSavedStarfish, force: true);
+        var savedSeaPillars = !options.ProtectPremiumCharts || rareCurrencyActive ? 0 : RemoveUnused(
+            working, usedPieceIds, IsSeaPillars, SeaPillarsScore,
+            maxSave: Math.Clamp(options.SaveSeaPillars, 0, 9), force: true);
+
         var divineCenters = EnumerateCells()
             .Where(c => OrbPriority(BordersAt(tileBorders, c.Row, c.Col)) == 4)
             .Select(c => (c.Row, c.Col))
@@ -201,9 +237,31 @@ public static class VoyagePlacementRules
         var surplusClams = clamCountAtStart > MaxSavedClamsForAmulet;
         var hasOrbs = orbCenters.Count > 0;
         var strongTreasure = BoardHasStrongTreasureAnchors(tileBorders);
-        var spendStrongboxesNow = hasOrbs;
-        var spendLostMessagesNow = options.DedicatedMessageActive;
-        var spendSulphurNow = options.SulphurStrategyActive;
+        var operativeFleetActive = false;
+        if (options.OperativeFleetActive)
+        {
+            foreach (var cell in EnumerateCells())
+            {
+                var chart = TakeBest(working, usedPieceIds, IsOperativeBoxChart, OperativeBoxScore);
+                if (chart == null)
+                    break;
+                LockCell(cell.Row, cell.Col, chart);
+            }
+            operativeFleetActive = locks.Count == 9;
+        }
+
+        var divinerFleetActive = false;
+        if (options.DivinerFleetActive)
+        {
+            foreach (var cell in EnumerateCells())
+            {
+                var chart = TakeBest(working, usedPieceIds, IsDivinerBoxChart, DivinerBoxScore);
+                if (chart == null)
+                    break;
+                LockCell(cell.Row, cell.Col, chart);
+            }
+            divinerFleetActive = locks.Count == 9;
+        }
 
         // The rewarded tile is the kill chamber. Sea Pillars supplies natural density there;
         // adjacent charts then inject rollable strongboxes into the same rare-currency area.
@@ -325,7 +383,8 @@ public static class VoyagePlacementRules
                          .OrderByDescending(c => HasChartEffectBorder(BordersAt(tileBorders, c.Row, c.Col)))
                          .ThenByDescending(c => InGridDegree(c.Row, c.Col)))
             {
-                var sulphur = TakeBest(working, usedPieceIds, IsSulphurChart, SulphurChartScore);
+                var sulphur = TakeBest(working, usedPieceIds,
+                    p => IsHighValueSulphurChart(p, options.MinimumSulphurPercent), SulphurChartScore);
                 if (sulphur == null)
                     break;
                 LockCell(cell.Row, cell.Col, sulphur);
@@ -478,54 +537,9 @@ public static class VoyagePlacementRules
             ? RemoveUnused(working, usedPieceIds, IsAnchorfieldChart, FarmPriority)
             : 0;
 
-        var savedStrongbox = 0;
-        var savedStarfish = 0;
-        var savedAdjacentRare = 0;
-        var savedRareVoyage = 0;
-        if (reserveCharts && options.ReserveStrongboxesForValuableCurrency && !spendStrongboxesNow)
-        {
-            savedStrongbox = RemoveUnused(working, usedPieceIds, IsStrongboxCountChart,
-                BoxValue1Score, maxSave: Math.Clamp(options.SaveStrongboxes, 0, 120));
-        }
-
-        if (reserveCharts && options.ProtectBrineKing &&
-            !options.UseBrineKingSynergy && !options.GroundLootStrategyActive && !hasOrbs)
-        {
-            savedStarfish = RemoveUnused(working, usedPieceIds, IsStarfishChart,
-                StarfishScore, maxSave: MaxSavedStarfish);
-            var supportSlotsLeft = Math.Max(0, MaxSavedStarfish - savedStarfish);
-            if (supportSlotsLeft > 0)
-            {
-                savedAdjacentRare = RemoveUnused(working, usedPieceIds, IsAdjacentRareSaveChart,
-                    AdjacentRareScore, maxSave: supportSlotsLeft);
-            }
-        }
-
-        if (reserveCharts && options.ReserveGlobalRareForPremiumStrategies &&
-            !hasOrbs && !brineKingSynergyActive)
-            savedRareVoyage = RemoveUnused(working, usedPieceIds, IsRareVoyageChart,
-                RareVoyageScore, maxSave: Math.Clamp(options.SaveGlobalRare, 0, 120));
-
-        var savedBrineKing = reserveCharts && options.ProtectBrineKing
+        var savedBrineKing = options.ProtectPremiumCharts && options.ProtectBrineKing && !options.UseBrineKingSynergy
             ? RemoveUnused(working, usedPieceIds, IsBrineKingsDomain, BrineKingScore,
-                maxSave: Math.Clamp(options.SaveBrineKing, 0, 120), force: true)
-            : 0;
-
-        var savedSeaPillars = reserveCharts && options.RareCurrencyStrongboxEngine
-            ? RemoveUnused(working, usedPieceIds, IsSeaPillars, SeaPillarsScore,
-                maxSave: Math.Clamp(options.SaveSeaPillars, 0, 20), force: true)
-            : 0;
-
-        var savedOperative = reserveCharts && options.CenterSpecialty && !spendStrongboxesNow
-            ? RemoveUnused(working, usedPieceIds, IsOperativeBoxChart)
-            : 0;
-        var savedLostMessage = reserveCharts && options.DedicatedLostMessageStrategy && !spendLostMessagesNow
-            ? RemoveUnused(working, usedPieceIds, IsLostMessageChart, LostMessageScore,
-                maxSave: Math.Clamp(options.SaveLostMessageCharts, 0, 120))
-            : 0;
-        var savedSulphur = reserveCharts && options.ReserveSulphurForSulphurBorder && !spendSulphurNow
-            ? RemoveUnused(working, usedPieceIds, IsSulphurChart, SulphurChartScore,
-                maxSave: Math.Clamp(options.SaveSulphurCharts, 0, 120))
+                maxSave: Math.Clamp(options.SaveBrineKing, 0, 9), force: true)
             : 0;
 
         var savedUniqueAmulet = 0;
@@ -538,7 +552,7 @@ public static class VoyagePlacementRules
                 maxSave: MaxSavedClamsForAmulet, force: true);
         }
 
-        if (reserveCharts && surplusClams)
+        if (reserveCharts && options.UniqueAmuletClamCross && surplusClams)
         {
             if (preferClamsAdjacentToAmulet)
             {
@@ -575,7 +589,7 @@ public static class VoyagePlacementRules
             : 0;
         var savedUniqueBelt = 0;
         var savedUniqueRing = 0;
-        if (reserveCharts)
+        if (reserveCharts && options.CenterSpecialty)
         {
             foreach (var piece in working
                          .Where(p => !usedPieceIds.Contains(p.Id) &&
@@ -620,6 +634,10 @@ public static class VoyagePlacementRules
             activeStrategies.Add("Brine King + Rare Monsters");
         if (seaPillarsStrongboxEngineActive)
             activeStrategies.Add("Sea Pillars + Strongbox Rare Engine");
+        if (operativeFleetActive)
+            activeStrategies.Add("9 Operative Strongboxes: Voyage dedicada");
+        if (divinerFleetActive)
+            activeStrategies.Add("9 Diviner Strongboxes: Voyage dedicada");
         if (messageStrategyActive)
             activeStrategies.Add("Messages in a Bottle: foco único");
         if (sulphurStrategyActive)
@@ -630,7 +648,7 @@ public static class VoyagePlacementRules
         return new Result(
             working, locks,
             savedPelagic, savedFarm, savedStrongbox, savedStarfish, savedRareVoyage,
-            savedAdjacentRare, savedOperative, savedLostMessage, savedSulphur, savedKishara,
+            savedAdjacentRare, savedOperative, savedDiviner, savedLostMessage, savedSulphur, savedKishara,
             savedNoEquipment, savedFractured, savedGoldenLanterns, savedPantheon,
             savedSoulEater, savedRareFracture, savedRarePossessed,
             savedClam, savedUniqueAmulet,
@@ -781,6 +799,9 @@ public static class VoyagePlacementRules
     public static bool IsOperativeBoxChart(MapPiece piece) =>
         piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentOperativeBoxPrefix));
 
+    public static bool IsDivinerBoxChart(MapPiece piece) =>
+        piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentDivinerBoxPrefix));
+
     public static bool IsStarfishChart(MapPiece piece) =>
         piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentStarfishPrefix));
 
@@ -800,6 +821,17 @@ public static class VoyagePlacementRules
         piece.Modifiers.Any(m =>
             IsFamily(m.Name, VoyageResourceFoundPrefix) ||
             m.Tags.HasFlag(ModifierTag.Sulphur));
+
+    public static int SulphurPercent(MapPiece piece) =>
+        piece.Modifiers
+            .Where(m => IsFamily(m.Name, VoyageResourceFoundPrefix) ||
+                        m.Tags.HasFlag(ModifierTag.Sulphur))
+            .Select(m => Math.Abs(m.Value1))
+            .DefaultIfEmpty(0)
+            .Max();
+
+    public static bool IsHighValueSulphurChart(MapPiece piece, int minimumPercent = 25) =>
+        IsSulphurChart(piece) && SulphurPercent(piece) >= minimumPercent;
 
     public static bool IsLostMessageChart(MapPiece piece) =>
         piece.Modifiers.Any(m => IsFamily(m.Name, AdjacentLostMessagePrefix));
@@ -1058,6 +1090,9 @@ public static class VoyagePlacementRules
     private static double OperativeBoxScore(MapPiece p) =>
         MaxFamilyValue1Score(p, AdjacentOperativeBoxPrefix);
 
+    private static double DivinerBoxScore(MapPiece p) =>
+        MaxFamilyValue1Score(p, AdjacentDivinerBoxPrefix);
+
     private static double StarfishScore(MapPiece p) =>
         MaxFamilyValue1Score(p, AdjacentStarfishPrefix);
 
@@ -1280,9 +1315,10 @@ public static class VoyagePlacementRules
 
     private static bool TrySavePiece(List<MapPiece> working, int pieceId, bool force = false)
     {
-        // "force" means that this strategy outranks the normal hold-out priority; it must never
-        // make the voyage unsolvable by leaving fewer than the nine required charts.
-        if (working.Count <= 9)
+        // Hard economic reservations may intentionally leave fewer than nine filler charts. In
+        // that case the UI reports that the premium package is still incomplete instead of
+        // silently spending it in a low-value voyage.
+        if (!force && working.Count <= 9)
             return false;
         return working.RemoveAll(p => p.Id == pieceId) > 0;
     }

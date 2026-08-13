@@ -378,6 +378,16 @@ public class PolygonClipper
                 // Remove the event from the status line
                 sweepEvent = sweepEvent.OtherEvent;
                 int it = statusLine.IndexOf(sweepEvent);
+
+                // Segment subdivision can leave an obsolete right-end event in the queue.
+                // Its paired left event has already been replaced or removed, so there is
+                // nothing left to remove from the status line. Treat it as a stale close
+                // event instead of forwarding -1 to List.RemoveAt.
+                if (it < 0)
+                {
+                    continue;
+                }
+
                 prevEvent = statusLine.Prev(it);
                 nextEvent = statusLine.Next(it);
 

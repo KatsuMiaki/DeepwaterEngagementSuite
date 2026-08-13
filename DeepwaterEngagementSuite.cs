@@ -40,6 +40,8 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
 
     private const string TextureName = "Icons.png";
 
+    private const int BubblePolygonSegmentCount = 64;
+
     private const float GridToWorldMultiplier = 250 / 23f;
 
     private readonly Dictionary<uint, EntityCacheItem> _cachedEntities = new Dictionary<uint, EntityCacheItem>();
@@ -810,7 +812,7 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
         {
             if (Bubbles is { Count: > 0 } bubbles)
             {
-                _placedBubblePolygon = _shapeCache.GetOrAdd(bubbles.ToHashSet(), a => a.Select(x => GetCirclePolygon(x.Item1, x.Item2)).Aggregate(PolygonClipper.Union));
+                _placedBubblePolygon = _shapeCache.GetOrAdd(bubbles.ToHashSet(), BuildMergedBubblePolygon);
                 if (Settings.BubbleSettings.ShowBubblesOnMap)
                 {
                     foreach (var cont in _placedBubblePolygon)
@@ -980,9 +982,9 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
             if (Settings.PlannerSettings.MergePlannedBubbles)
             {
                 plannedPoly = _shapeCache.GetOrAdd(usedPath.Keys.Select(x => (x, _bubbleRadius)).ToHashSet(),
-                    a => a.Select(x => GetCirclePolygon(x.Item1, x.Item2)).Aggregate(PolygonClipper.Union));
+                    BuildMergedBubblePolygon);
                 if (_placedBubblePolygon != null)
-                    plannedPoly = PolygonClipper.Difference(plannedPoly, _placedBubblePolygon);
+                    plannedPoly = SafePolygonDifference(plannedPoly, _placedBubblePolygon);
               
             }
 
@@ -1048,17 +1050,84 @@ public partial class DeepwaterEngagementSuite : BaseSettingsPlugin<DeepwaterEnga
 
     public static Polygon GetCirclePolygon(Vector2 center, float radius)
     {
-        var vertices = Enumerable.Range(0, 100).Select(v => center + Vector2.UnitX.Rotate(v * 360 / 100.0f) * radius).ToList();
-        var p = new Polygon()
+        var polygon = new Polygon();
+        if (!float.IsFinite(radius) || radius <= 0)
         {
-            new Contour()
-        };
-        foreach (var vertex in vertices)
-        {
-            p.GetLastContour().Add(new Vertex(vertex.X, vertex.Y));
+            return polygon;
         }
 
-        return p;
+        var contour = new Contour();
+        for (var i = 0; i < BubblePolygonSegmentCount; i++)
+        {
+            var angle = i * MathF.Tau / BubblePolygonSegmentCount;
+            var vertex = center + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius;
+            contour.Add(new Vertex(vertex.X, vertex.Y));
+        }
+
+        polygon.Add(contour);
+        return polygon;
+    }
+
+    private static Polygon BuildMergedBubblePolygon(HashSet<(Vector2i Position, float Radius)> bubbles)
+    {
+        var source = bubbles
+            .Where(x => float.IsFinite(x.Radius) && x.Radius > 0)
+            .Select(x => GetCirclePolygon(x.Position, x.Radius))
+            .ToList();
+
+        if (source.Count == 0)
+        {
+            return new Polygon();
+        }
+
+        try
+        {
+            // Merge in balanced pairs. This keeps intermediate polygons smaller than a
+            // left-to-right Aggregate and materially reduces clipping work for long paths.
+            var layer = new List<Polygon>(source);
+            while (layer.Count > 1)
+            {
+                var next = new List<Polygon>((layer.Count + 1) / 2);
+                for (var i = 0; i < layer.Count; i += 2)
+                {
+                    next.Add(i + 1 < layer.Count
+                        ? PolygonClipper.Union(layer[i], layer[i + 1])
+                        : layer[i]);
+                }
+
+                layer = next;
+            }
+
+            return layer[0];
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Rendering should never take the whole plugin down because two circle
+            // boundaries are degenerate. Keeping the original contours preserves a
+            // useful overlay even when a boolean merge cannot be completed.
+            var fallback = new Polygon(source.Sum(x => x.Count));
+            foreach (var polygon in source)
+            {
+                foreach (var contour in polygon)
+                {
+                    fallback.Add(contour.DeepClone());
+                }
+            }
+
+            return fallback;
+        }
+    }
+
+    private static Polygon SafePolygonDifference(Polygon subject, Polygon clipping)
+    {
+        try
+        {
+            return PolygonClipper.Difference(subject, clipping);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return subject;
+        }
     }
 
     private void ShowSearchWindow(PathPlanner.DetailedLootScore score)

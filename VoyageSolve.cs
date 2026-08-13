@@ -107,8 +107,8 @@ public sealed class VoyageSolve
             prunedBefore += rawFinal?.NodesPruned ?? 0;
         }
 
-        // Reservations are an economic preference, not a validity constraint. If the selected
-        // chart shapes cannot connect, restore every held chart and keep the strategic locks.
+        // Relax only ordinary reservations. VoyagePlacementRules reapplies hard economic
+        // stockpiles on this attempt, so premium charts are never restored as filler.
         FallbackStage = VoyageSolveFallbackStage.ReservationsRelaxed;
         RecoveredWithFastSolver = true;
         ConfigureAttempt(
@@ -130,23 +130,9 @@ public sealed class VoyageSolve
         if (HasSolution(rawFinal))
             yield break;
 
-        exploredBefore += rawFinal?.NodesExplored ?? 0;
-        prunedBefore += rawFinal?.NodesPruned ?? 0;
-
-        // Last resort: remove only positional strategy locks. Selected layout families and lethal
-        // Pantheon/Brine/Possessed exclusions remain hard constraints.
-        FallbackStage = VoyageSolveFallbackStage.StrategyLocksRelaxed;
-        ConfigureAttempt(
-            focusedPieces, tileBorders, strategyOptions,
-            reserveCharts: false,
-            disablePlacementRules: true,
-            layoutPreference: layoutPreference,
-            layoutPreferenceStrength: layoutPreferenceStrength,
-            allowedLayoutFamilies: allowedLayoutFamilies,
-            minimumLayoutSimilarity: minimumLayoutSimilarity);
-
-        foreach (var raw in SolveCurrent(useFastSolver: true, settings: settings))
-            yield return WithOffset(raw, exploredBefore, prunedBefore);
+        // Do not restore hard economic reservations or discard the selected strategy merely to
+        // manufacture a result. The UI should report no valid filler voyage in this situation.
+        yield break;
     }
 
     private void ConfigureAttempt(
